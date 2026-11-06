@@ -225,7 +225,7 @@ console.log("10) bilingual dropdown (ms default / en)");
 
   const enSearch = await req("/search?q=projector&lang=en");
   const searchBody = await enSearch.text();
-  check("en results labels", searchBody.includes("products") && searchBody.includes("Order →"));
+  check("en results labels", searchBody.includes("products") && searchBody.includes("WhatsApp") && searchBody.includes("Telegram"));
   check(
     "lang switch keeps query",
     searchBody.includes("q=projector") && searchBody.includes("lang=ms"),
@@ -262,7 +262,7 @@ console.log("11) conversational chat");
   check("chat reply text", typeof oneData.reply === "string" && oneData.reply.length > 5);
   check("chat products", Array.isArray(oneData.products) && oneData.products.length > 0);
   check("chat products html", oneData.products_html.includes('class="card"'));
-  check("chat order buttons", oneData.products_html.includes("Order →"));
+  check("chat order buttons", oneData.products_html.includes("WhatsApp") && oneData.products_html.includes("Telegram"));
 
   const multi = await req("/api/chat", {
     method: "POST",
@@ -572,6 +572,35 @@ console.log("19) policy pages + footer");
     const body = await (await req(path)).text();
     check(`footer on ${path}`, body.includes('class="footerlinks"') && body.includes('href="/refunds"'));
   }
+}
+
+console.log("20) Telegram checkout + support");
+{
+  const page = await req("/search?q=earbuds&currency=USD");
+  const body = await page.text();
+  check("whatsapp button", body.includes("wa.me/60173735431?text="));
+  check("telegram button", body.includes("t.me/Mykirashopbot?text="));
+  check("dual order row", body.includes('class="buyrow"'));
+  const tgMatch = body.match(/https:\/\/t\.me\/Mykirashopbot\?text=([^"&]+)/);
+  check("telegram prefill", Boolean(tgMatch), "missing");
+  if (tgMatch) {
+    const text = decodeURIComponent(tgMatch[1]);
+    check("prefill mentions bot", text.includes("@Mykirashopbot"), text.slice(0, 60));
+    check("prefill has title", text.includes("Earbuds"), text.slice(0, 80));
+    check("prefill has MYR equivalent", text.includes("MYR"), text.slice(0, 80));
+  }
+
+  const footer = await (await req("/")).text();
+  check("footer telegram", footer.includes("t.me/Mykirashopbot"));
+  check("footer whatsapp", footer.includes("wa.me/60173735431"));
+
+  for (const lang of ["ms", "en", "id", "zh"]) {
+    const contact = await (await req(`/contact?lang=${lang}`)).text();
+    check(`contact telegram ${lang}`, contact.includes("t.me/Mykirashopbot"));
+  }
+
+  const checkout = await (await req("/checkout?source=cj&id=x1&base=50")).text();
+  check("checkout telegram button", checkout.includes('class="tg-btn"'));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

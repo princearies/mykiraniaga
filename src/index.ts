@@ -469,6 +469,37 @@ function formatMoney(
 /* ------------------------------------------------------------------ */
 
 const DEFAULT_WHATSAPP = "60173735431";
+const TELEGRAM_BOT = "Mykirashopbot";
+
+/** Pre-filled order text shared by the WhatsApp and Telegram buttons. */
+function orderMessage(
+  product: PricedProduct,
+  lang: Lang,
+  currency: CurrencyCode,
+  rate: number,
+): string {
+  const total = convertCurrency(product.total_myr, rate);
+  const amount =
+    currency === "MYR"
+      ? formatMoney(total, currency, lang)
+      : `${formatMoney(total, currency, lang)} (MYR ${product.total_myr.toFixed(2)})`;
+  const ref = `${product.source_label} ${product.id}`;
+
+  switch (lang) {
+    case "en":
+      return `Hi @${TELEGRAM_BOT}! I want to order: ${product.title}. Total: ${amount}. Supplier: ${ref}.`;
+    case "id":
+      return `Hai @${TELEGRAM_BOT}! Saya mau pesan: ${product.title}. Total: ${amount}. Pemasok: ${ref}.`;
+    case "zh":
+      return `你好 @${TELEGRAM_BOT}！我想下单：${product.title}。合计：${amount}。供应商：${ref}。`;
+    default:
+      return `Hai @${TELEGRAM_BOT}! Saya nak order: ${product.title}. Jumlah: ${amount}. Pembekal: ${ref}.`;
+  }
+}
+
+function telegramUrl(text: string): string {
+  return `https://t.me/${TELEGRAM_BOT}?text=${encodeURIComponent(text)}`;
+}
 
 function pricingFromEnv(env: Env): Pricing {
   const pct = num(env.PRICE_MARKUP_PCT);
@@ -2144,6 +2175,16 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .margin{font-size:11px;color:#8fa3c4;border-top:1px dashed #1c2b45;padding-top:7px;margin-top:2px}
 .margin b{color:#fbbf24}
 .foot .cta-buy{background:linear-gradient(135deg,#22d3ee,#7dd3fc);color:#04121c;border:0}
+.buyrow{display:flex;gap:6px;margin-top:6px}
+.buyrow .cta{flex:1;text-align:center;font-size:11.5px;padding:8px 6px;font-weight:700}
+.cta-wa{background:#0f3b2e;border-color:#1d6b52;color:#86efac}
+.cta-wa:hover{background:#124a38;text-decoration:none}
+.cta-tg{background:#122a44;border-color:#1e4a6e;color:#7dd3fc}
+.cta-tg:hover{background:#173451;text-decoration:none}
+.tg-btn{display:flex;align-items:center;justify-content:center;margin-top:10px;background:#122a44;color:#7dd3fc;border:1px solid #1e4a6e;font-weight:700;border-radius:12px;padding:12px;text-decoration:none;font-size:14px}
+.tg-btn:hover{background:#173451;text-decoration:none}
+.footsoc{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;width:100%;color:#7c93b8;margin-bottom:6px}
+.footsoc a{color:#7dd3fc}
 .foot .cta-buy:hover{filter:brightness(1.07)}
 .src-link{font-size:11px;color:#7c93b8;margin-top:2px}
 .status-card{background:#0d1829;border:1px solid #1a2a42;border-radius:13px;padding:16px 18px;margin-top:26px}
@@ -2252,6 +2293,7 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
   .chatcompose button{min-height:44px;min-width:76px;font-size:15px}
   .quickchips button{min-height:44px;padding:10px 16px;font-size:13.5px}
   .cta-buy{min-height:44px;display:inline-flex;align-items:center;justify-content:center;padding:10px 14px}
+  .buyrow .cta{min-height:44px;display:flex;align-items:center;justify-content:center;font-size:12.5px}
   .chattools{font-size:12.5px}
   .chattools button{min-height:44px;padding:6px 4px}
   .productspill{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:48px;margin:10px 0 0;border:0;border-radius:12px;background:linear-gradient(135deg,#22d3ee,#7dd3fc);color:#04121c;font:inherit;font-weight:800;font-size:14px;cursor:pointer;box-shadow:0 8px 24px rgba(34,211,238,.18)}
@@ -2704,6 +2746,10 @@ function layout(opts: {
         (slug) => `<a href="/${slug}">${esc(POLICY[lang][slug].title)}</a>`,
       ).join("\n      ")}
     </nav>
+    <div class="footsoc">
+      <a href="https://wa.me/${DEFAULT_WHATSAPP}" target="_blank" rel="noopener">WhatsApp</a>
+      <a href="https://t.me/${TELEGRAM_BOT}" target="_blank" rel="noopener">Telegram @${TELEGRAM_BOT}</a>
+    </div>
     <span>MyKiraNiaga v${VERSION} · Hono + Cloudflare Workers</span>
     <span>${esc(t(lang, "footer_note"))}</span>
   </footer>
@@ -3116,6 +3162,7 @@ function productCard(
   lang: Lang,
   currency: CurrencyCode = "MYR",
   rate = 1,
+  env: Env = {},
 ): string {
   const thumb = product.image
     ? `<img src="${esc(product.image)}" alt="${esc(product.title)}" loading="lazy" referrerpolicy="no-referrer">`
@@ -3152,9 +3199,16 @@ function productCard(
       <span class="total">${esc(t(lang, "card_total"))} <b ${moneyAttr(
         product.total_myr,
       )}>${fmt(product.total_myr)}</b></span>
-      <a class="cta cta-buy" href="${esc(product.checkout_url)}">${esc(
-        t(lang, "card_order"),
-      )} →</a>
+    </div>
+    <div class="buyrow">
+      <a class="cta cta-wa" href="https://wa.me/${whatsappNumber(
+        env,
+      )}?text=${encodeURIComponent(
+        orderMessage(product, lang, currency, rate),
+      )}" target="_blank" rel="noopener">WhatsApp</a>
+      <a class="cta cta-tg" href="${esc(
+        telegramUrl(orderMessage(product, lang, currency, rate)),
+      )}" target="_blank" rel="noopener">Telegram</a>
     </div>
     <a class="src-link" href="${esc(
       product.url,
@@ -3291,9 +3345,10 @@ function resultsBody(
   view: ViewMode,
   currency: CurrencyCode = "MYR",
   rate = 1,
+  env: Env = {},
 ): string {
   const cards = payload.results
-    .map((product) => productCard(product, lang, currency, rate))
+    .map((product) => productCard(product, lang, currency, rate, env))
     .join("\n");
   const hasResults = payload.results.length > 0;
 
@@ -3488,6 +3543,10 @@ const POLICY: Record<Lang, Record<PolicySlug, PolicyDoc>> = {
           ],
         },
         {
+          heading: "Telegram",
+          body: ["@Mykirashopbot — https://t.me/Mykirashopbot"],
+        },
+        {
           heading: "E-mel",
           body: [
             "support@mykiraniaga.example (placeholder — akan dikemas kini apabila domain rasmi siap).",
@@ -3639,6 +3698,10 @@ const POLICY: Record<Lang, Record<PolicySlug, PolicyDoc>> = {
           body: [
             "WhatsApp Business: +60 17-373 5431 — https://wa.me/60173735431",
           ],
+        },
+        {
+          heading: "Telegram",
+          body: ["@Mykirashopbot — https://t.me/Mykirashopbot"],
         },
         {
           heading: "Email",
@@ -3974,6 +4037,7 @@ interface CheckoutOrder {
   display_shipping?: string;
   display_margin?: string;
   display_total?: string;
+  telegram_url?: string;
 }
 
 function checkoutBody(order: CheckoutOrder, query: string, lang: Lang): string {
@@ -4004,6 +4068,7 @@ function checkoutBody(order: CheckoutOrder, query: string, lang: Lang): string {
   <a class="wa-btn" href="${esc(
     order.whatsapp_url,
   )}" target="_blank" rel="noopener">${esc(t(lang, "checkout_wa"))}</a>
+  <a class="tg-btn" href="${esc(order.telegram_url ?? telegramUrl(""))}" target="_blank" rel="noopener">Telegram</a>
   <p class="note">${esc(t(lang, "checkout_note"))}</p>
   <a class="back" href="${esc(back)}">← ${esc(t(lang, "checkout_back"))}</a>
 </div></div>`;
@@ -4224,7 +4289,7 @@ app.post("/api/chat", async (c) => {
     presentProduct(product, c.env, currency, rate, lang),
   );
   const cards = ranked
-    .map((product) => productCard(product, lang, currency, rate))
+    .map((product) => productCard(product, lang, currency, rate, c.env))
     .join("\n");
   const productsHtml = products.length ? `<div class="grid">${cards}</div>` : "";
 
@@ -4355,6 +4420,7 @@ app.get("/search", async (c) => {
         viewFrom(c.req.query("view")),
         currencyFrom(c.req.query("currency")),
         rateFor(await getRates(c.env), currencyFrom(c.req.query("currency"))),
+        c.env,
       ),
       lang,
       currentUrl: c.req.url,
@@ -4456,6 +4522,12 @@ app.get("/checkout", async (c) => {
     whatsapp_url: `https://wa.me/${whatsappNumber(c.env)}?text=${encodeURIComponent(
       waText,
     )}`,
+    telegram_url: telegramUrl(
+      waText.replace("Saya nak order:", `Hai @${TELEGRAM_BOT}! Saya nak order:`)
+        .replace("I want to order:", `Hi @${TELEGRAM_BOT}! I want to order:`)
+        .replace("Saya mau pesan:", `Hai @${TELEGRAM_BOT}! Saya mau pesan:`)
+        .replace("我想下单：", `你好 @${TELEGRAM_BOT}！我想下单：`),
+    ),
     display_currency: currency,
     display_supplier: display(margin.supplier_price),
     display_shipping: display(shipping.cost_myr),

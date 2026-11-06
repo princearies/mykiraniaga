@@ -68,6 +68,25 @@ muat semula dengan `?view=`.
 - Setiap halaman ada pautan **← Kembali** di atas dan bawah.
 - `?format=json` memulangkan `{slug, lang, title, intro, sections}`.
 
+## Checkout dua saluran (WhatsApp + Telegram)
+
+Setiap kad produk (Search & Chat) ada dua butang sentuh:
+
+- **WhatsApp** → `wa.me/60173735431?text=…`
+- **Telegram** → `t.me/Mykirashopbot?text=…`
+
+Mesej pra-isi dibina mengikut bahasa & mata wang:
+
+```
+Hai @Mykirashopbot! Saya nak order: Waterproof Silicone Wired Earbuds.
+Jumlah: $2.01 (MYR 8.14). Pembekal: CJ Dropshipping 2608131003241622901.
+```
+
+(EN/ID/ZH ada versi masing-masing; jumlah sentiasa sertakan nilai MYR.)
+Halaman `/checkout` juga ada butang Telegram di bawah WhatsApp.
+Footer semua halaman dan `/contact` (4 bahasa) menyenaraikan
+**WhatsApp + Telegram @Mykirashopbot** sebagai saluran rasmi.
+
 ## Multi-mata wang
 
 - Kadar dari `https://open.er-api.com/v6/latest/MYR`, cache **12 jam** dalam memori isolate
