@@ -19,11 +19,23 @@ order WhatsApp.
 | `POST /api/chat` | Chat multi-turn (JSON): `{messages:[{role,content}], lang}` |
 | `GET /search?q=...` | HTML untuk manusia · JSON bila `?format=json` atau `Accept: application/json` |
 | `GET /api/search?q=...` | JSON sahaja (bot) |
+| `GET /status` | Panel status sistem (HTML) · JSON dengan `?format=json` |
 | `GET /checkout?source=&id=&base=` | Ringkasan order + butang WhatsApp (HTML atau JSON) |
 | `GET /api` | Indeks endpoint |
 | `GET /health` | Status, key config, margin |
 
 Query params: `q` (2–200 aksara), `format=json\|html`, `lang=ms\|en`, `limit=1..40`.
+
+## Pemisahan laluan
+
+| Laluan | Kandungan |
+|---|---|
+| `/` dan `/chat` | Chat sahaja — bubble sejarah + kotak input |
+| `/search` | Halaman carian bersih (kotak besar ala Google) — tiada chat, tiada panel status |
+| `/search?q=` | Kotak carian + grid produk sahaja |
+| `/status` | Panel status sistem (kunci API, margin, WhatsApp) |
+
+Nav: **Chat · Carian · API · Status**. `/health` kekal JSON untuk bot.
 
 ## Chat percakapan
 

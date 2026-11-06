@@ -1649,6 +1649,16 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .langlist a.active{color:#22d3ee;font-weight:700}
 .top nav{align-items:center}
 .top nav a{white-space:nowrap}
+.searchhome{max-width:660px;margin:7vh auto 0;text-align:center}
+.searchlogo{font-size:clamp(30px,5vw,44px);font-weight:800;letter-spacing:-1.2px;background:linear-gradient(100deg,#22d3ee,#a78bfa 75%);-webkit-background-clip:text;background-clip:text;color:transparent}
+.searchtag{color:#9db2d3;font-size:14.5px;margin:10px auto 22px;max-width:520px}
+.search.search-big{padding:9px;border-radius:999px}
+.search.search-big input{font-size:17px;padding:13px 18px}
+.search.search-big button{border-radius:999px;padding:0 26px;font-size:15px}
+.chips.center{justify-content:center}
+.statuspage{max-width:720px;margin:8px auto 0}
+.statuspage .status-card{margin-top:0}
+.statuslinks{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;font-size:13px;color:#7c93b8}
 .chatwrap{margin-top:8px}
 .chatlog{display:flex;flex-direction:column;gap:12px;background:#0b1524;border:1px solid #1a2a42;border-radius:16px;padding:18px;min-height:280px;max-height:60vh;overflow-y:auto;scroll-behavior:smooth}
 .msg{display:flex;gap:10px}
@@ -1763,6 +1773,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     chat_typing: "Sedang mencari…",
     chat_empty: "Tak jumpa produk dalam bajet itu — cuba naikkan bajet.",
     chat_hint: "Enter untuk hantar · Shift+Enter baris baru",
+    status_lede:
+      "Semakan konfigurasi enjin: kunci API, margin dan nombor WhatsApp.",
   },
   en: {
     tagline: "on-demand dropshipping search",
@@ -1846,6 +1858,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     chat_typing: "Searching…",
     chat_empty: "No products inside that budget — try raising it.",
     chat_hint: "Enter to send · Shift+Enter for a new line",
+    status_lede: "Engine configuration check: API keys, margin and WhatsApp number.",
   },
 };
 
@@ -1888,7 +1901,7 @@ function layout(opts: {
       <a href="/">${esc(t(lang, "nav_chat"))}</a>
       <a href="/search">${esc(t(lang, "nav_search"))}</a>
       <a href="/api">${esc(t(lang, "nav_api"))}</a>
-      <a href="/health">${esc(t(lang, "nav_status"))}</a>
+      <a href="/status">${esc(t(lang, "nav_status"))}</a>
       <details class="langmenu">
         <summary>${lang === "ms" ? "BM" : "EN"} ▾</summary>
         <div class="langlist">
@@ -2043,12 +2056,16 @@ function chatBody(env: Env, lang: Lang): string {
       .join("")}
   </div>
 </section>
-${statusPanel(env, lang)}
 <script>${script}</script>`;
 }
 
-function searchForm(q: string, autofocus: boolean, lang: Lang): string {
-  return `<form class="search" action="/search" method="get" role="search">
+function searchForm(
+  q: string,
+  autofocus: boolean,
+  lang: Lang,
+  big = false,
+): string {
+  return `<form class="search${big ? " search-big" : ""}" action="/search" method="get" role="search">
   <input type="hidden" name="lang" value="${lang}">
   <input type="search" name="q" value="${esc(q)}" placeholder="${esc(
     t(lang, "search_placeholder"),
@@ -2173,40 +2190,39 @@ function statusPanel(env: Env, lang: Lang): string {
 </div>`;
 }
 
-function landingBody(env: Env, lang: Lang, errorNote?: string): string {
-  return `<h1>${esc(t(lang, "land_h1_a"))} <span>${esc(
-    t(lang, "land_h1_b"),
-  )}</span></h1>
-<p class="lede">${esc(t(lang, "land_lede"))}</p>
-${searchForm("", true, lang)}
-${errorNote ? `<div class="chips"><span class="chip err">${esc(errorNote)}</span></div>` : ""}
-<div class="chips">
-${EXAMPLES.map(
-  (example) =>
-    `<a class="chip" href="/search?q=${encodeURIComponent(example)}&amp;lang=${lang}">${esc(
-      example,
-    )}</a>`,
-).join("")}
-</div>
-<div class="steps">
-  <div class="step"><b>01</b><h3>${esc(t(lang, "step1_t"))}</h3><p>${esc(
-    t(lang, "step1_d"),
-  )}</p></div>
-  <div class="step"><b>02</b><h3>${esc(t(lang, "step2_t"))}</h3><p>${esc(
-    t(lang, "step2_d"),
-  )}</p></div>
-  <div class="step"><b>03</b><h3>${esc(t(lang, "step3_t"))}</h3><p>${esc(
-    t(lang, "step3_d"),
-  )}</p></div>
-</div>
+function statusBody(env: Env, lang: Lang): string {
+  return `<h1>${esc(t(lang, "status_title"))}</h1>
+<p class="lede">${esc(t(lang, "status_lede"))}</p>
+<div class="statuspage">
 ${statusPanel(env, lang)}
-<details class="api">
-  <summary>${esc(t(lang, "api_details"))}</summary>
-  <pre>curl "https://mykiraniaga.mykira.workers.dev/api/search?q=mini+projector+bawah+RM80"
-curl -H "Accept: application/json" "https://mykiraniaga.mykira.workers.dev/search?q=earbuds"</pre>
-</details>`;
+<div class="statuslinks">
+  <a href="/health">/health (JSON)</a>
+  <a href="/api">/api</a>
+  <a href="/">${esc(t(lang, "nav_chat"))}</a>
+</div>
+</div>`;
 }
 
+function searchHomeBody(lang: Lang, errorNote?: string): string {
+  return `<div class="searchhome">
+  <div class="searchlogo">MyKiraNiaga</div>
+  <p class="searchtag">${esc(t(lang, "land_lede"))}</p>
+  ${searchForm("", true, lang, true)}
+  ${
+    errorNote
+      ? `<div class="chips center"><span class="chip err">${esc(errorNote)}</span></div>`
+      : ""
+  }
+  <div class="chips center">
+    ${EXAMPLES.map(
+      (example) =>
+        `<a class="chip" href="/search?q=${encodeURIComponent(
+          example,
+        )}&amp;lang=${lang}">${esc(example)}</a>`,
+    ).join("")}
+  </div>
+</div>`;
+}
 function resultsBody(payload: SearchPayload, lang: Lang): string {
   const cards = payload.results.map((product) => productCard(product, lang)).join("\n");
   const jsonHref = `/search?q=${encodeURIComponent(payload.query)}&amp;format=json&amp;lang=${lang}`;
@@ -2241,12 +2257,7 @@ ${intentChips(payload, lang)}
   <span>· ${payload.meta.timing_ms} ms</span>
   <span>· <a href="${jsonHref}">JSON</a></span>
 </div>
-${body}
-<details class="api">
-  <summary>${esc(t(lang, "api_json_details"))}</summary>
-  <pre>GET /api/search?q=${esc(encodeURIComponent(payload.query))}
-Accept: application/json</pre>
-</details>`;
+${body}`;
 }
 
 function errorBody(message: string, lang: Lang): string {
@@ -2359,6 +2370,7 @@ app.get("/", (c) => {
         "GET /search?q=": "classic results (HTML/JSON negotiated)",
         "GET /api/search?q=": "search (JSON only)",
         "GET /checkout?source=&id=&base=": "order summary + WhatsApp handoff",
+        "GET /status": "system status page (HTML) · JSON with ?format=json",
         "GET /health": "health probe + key status",
       },
       config: configStatus(c.env),
@@ -2402,6 +2414,33 @@ app.get("/chat", (c) => {
           : "MyKiraNiaga — chat beli-belah",
       description: t(lang, "chat_lede"),
       body: chatBody(c.env, lang),
+      lang,
+      currentUrl: c.req.url,
+    }),
+  );
+});
+
+app.get("/status", (c) => {
+  if (wantsJson(c)) {
+    return c.json({
+      ok: true,
+      service: SERVICE,
+      version: VERSION,
+      keys: configStatus(c.env),
+      margin: pricingFromEnv(c.env),
+      whatsapp: `+${whatsappNumber(c.env)}`,
+    });
+  }
+
+  const lang = langFrom(c);
+  return c.html(
+    layout({
+      title:
+        lang === "en"
+          ? "System status — MyKiraNiaga"
+          : "Status sistem — MyKiraNiaga",
+      description: t(lang, "status_lede"),
+      body: statusBody(c.env, lang),
       lang,
       currentUrl: c.req.url,
     }),
@@ -2506,7 +2545,7 @@ app.get("/search", async (c) => {
       layout({
         title: t(lang, "meta_search_title"),
         description: t(lang, "meta_search_desc"),
-        body: landingBody(c.env, lang, t(lang, "empty_q")),
+        body: searchHomeBody(lang, t(lang, "empty_q")),
         lang,
         currentUrl: c.req.url,
       }),
@@ -2675,6 +2714,7 @@ app.get("/api", (c) =>
       "GET /search?q=&format=json": "search (content negotiated)",
       "GET /api/search?q=": "search (JSON)",
       "GET /checkout?source=&id=&base=": "checkout summary (HTML or JSON)",
+      "GET /status": "status page (HTML or JSON)",
       "GET /health": "health",
     },
     params: {

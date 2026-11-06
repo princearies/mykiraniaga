@@ -24,21 +24,44 @@ async function req(path, init = {}) {
   return app.fetch(new Request(`http://localhost${path}`, { ...init, headers }), env);
 }
 
-console.log("1) landing page + system status");
+console.log("1) routing: chat vs search vs status");
 {
-  const res = await req("/");
-  const body = await res.text();
-  check("status 200", res.status === 200, res.status);
-  check("html content-type", (res.headers.get("content-type") ?? "").includes("text/html"));
-  check("brand rendered", body.includes("MyKiraNiaga"));
-  check("chat compose form", body.includes('id="chatform"'));
-  const landing = await req("/search");
-  check("search form on /search", (await landing.text()).includes('action="/search"'));
-  check("status panel", body.includes("Status sistem"));
-  check("gemini key row", body.includes("GEMINI_API_KEY"));
-  check("cj key row", body.includes("CJ_API_KEY"));
-  check("aliexpress key row", body.includes("ALIEXPRESS_ADMIN_KEY"));
-  check("margin shown", body.includes("Margin <b>20%"));
+  const chat = await req("/");
+  const chatBody = await chat.text();
+  check("root 200", chat.status === 200, chat.status);
+  check("root is chat", chatBody.includes('id="chatlog"') && chatBody.includes('id="chatform"'));
+  check("root has no status panel", !chatBody.includes("Status sistem"));
+  check("brand rendered", chatBody.includes("MyKiraNiaga"));
+
+  const search = await req("/search");
+  const searchBody = await search.text();
+  check("search 200", search.status === 200, search.status);
+  check("search has form", searchBody.includes('action="/search"'));
+  check("search has big box", searchBody.includes("search-big"));
+  check("search has no chat log", !searchBody.includes('id="chatlog"'));
+  check("search has no chat input", !searchBody.includes('id="chatinput"'));
+  check("search has no status panel", !searchBody.includes("Status sistem"));
+
+  const results = await req("/search?q=projector");
+  const resultsBody = await results.text();
+  check("results grid", resultsBody.includes('class="grid"'));
+  check("results have no chat", !resultsBody.includes('id="chatlog"') && !resultsBody.includes('id="chatinput"'));
+  check("results have no api details", !resultsBody.includes('class="api"'));
+
+  const status = await req("/status");
+  const statusBody = await status.text();
+  check("status 200", status.status === 200, status.status);
+  check("status panel here", statusBody.includes("Status sistem"));
+  check("gemini key row", statusBody.includes("GEMINI_API_KEY"));
+  check("cj key row", statusBody.includes("CJ_API_KEY"));
+  check("aliexpress key row", statusBody.includes("ALIEXPRESS_ADMIN_KEY"));
+  check("margin shown", statusBody.includes("Margin <b>20%"));
+
+  const statusJson = await req("/status?format=json");
+  check(
+    "status json",
+    (statusJson.headers.get("content-type") ?? "").includes("json"),
+  );
 }
 
 console.log("2) json api with RM budget");
@@ -188,7 +211,8 @@ console.log("10) bilingual dropdown (ms default / en)");
   const en = await req("/?lang=en");
   const enBody = await en.text();
   check("en chat", enBody.includes("Just ask"));
-  check("en status panel", enBody.includes("System status"));
+  const enStatus = await req("/status?lang=en");
+  check("en status page", (await enStatus.text()).includes("System status"));
   check("en send button", enBody.includes(">Send</button>"));
   check(
     "lang cookie set",
