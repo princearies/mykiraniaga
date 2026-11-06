@@ -10,6 +10,9 @@ enabled = true
 GEMINI_MODEL = "gemini-flash-lite-latest"
 ALIEXPRESS_BASE_URL = "https://api-sg.aliexpress.com/sync"
 DEFAULT_USD_MYR = "4.72"
+PRICE_MARKUP_PCT = "20"
+PRICE_MARKUP_FLAT_MYR = "0"
+WHATSAPP_ORDER_NUMBER = "60173735431"
 ENVIRONMENT = "production"
 
 # Secrets — set once, never in this file:

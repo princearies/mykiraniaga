@@ -46,8 +46,16 @@ export interface Env {
   ALIEXPRESS_APP_SECRET?: string;
   ALIEXPRESS_TRACKING_ID?: string;
   ALIEXPRESS_BASE_URL?: string;
+  /** CJ MCP token alias — accepted when CJ_MCP_ACCESS_TOKEN is absent. */
+  CJ_API_KEY?: string;
   /** USD -> MYR rate used to normalise USD-priced sources. */
   DEFAULT_USD_MYR?: string;
+  /** Profit markup percentage applied to supplier price + shipping (default 20). */
+  PRICE_MARKUP_PCT?: string;
+  /** Flat profit margin in MYR added after the percentage (default 0). */
+  PRICE_MARKUP_FLAT_MYR?: string;
+  /** WhatsApp order number, digits only (default 60173735431). */
+  WHATSAPP_ORDER_NUMBER?: string;
   ENVIRONMENT?: string;
 }
 
@@ -96,6 +104,37 @@ interface Product {
   demo: boolean;
 }
 
+/**
+ * Product after margin + checkout decoration. `price_myr` / `total_myr` are the
+ * customer-facing (marked-up) numbers; supplier_* keep the raw cost.
+ */
+interface PricedProduct extends Product {
+  supplier_price_myr: number;
+  supplier_total_myr: number;
+  margin_myr: number;
+  checkout_url: string;
+  whatsapp_url: string;
+}
+
+interface Pricing {
+  markup_pct: number;
+  flat_myr: number;
+}
+
+interface KeyStatus {
+  key: string;
+  configured: boolean;
+  detail: string;
+}
+
+interface ConfigStatus {
+  gemini: KeyStatus;
+  cj: KeyStatus;
+  aliexpress: KeyStatus;
+  whatsapp: KeyStatus;
+  pricing: Pricing;
+}
+
 interface Intent {
   keyword: string;
   max_price_myr: number | null;
@@ -128,7 +167,9 @@ interface SearchPayload {
     basis: "price" | "total";
     removed: number;
   };
-  results: Product[];
+  results: PricedProduct[];
+  pricing: Pricing;
+  config: ConfigStatus;
   meta: {
     service: string;
     version: string;
@@ -217,6 +258,128 @@ function fxRate(env: Env): number {
   const parsed = Number(env.DEFAULT_USD_MYR);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 20) return DEFAULT_FX;
   return parsed;
+}
+
+/* ------------------------------------------------------------------ */
+/* Pricing, checkout links and runtime key status                      */
+/* ------------------------------------------------------------------ */
+
+const DEFAULT_WHATSAPP = "60173735431";
+
+function pricingFromEnv(env: Env): Pricing {
+  const pct = num(env.PRICE_MARKUP_PCT);
+  const flat = num(env.PRICE_MARKUP_FLAT_MYR);
+  return {
+    markup_pct: pct === null ? 20 : clamp(round2(pct), 0, 300),
+    flat_myr: flat === null ? 0 : clamp(round2(flat), 0, 1000),
+  };
+}
+
+function whatsappNumber(env: Env): string {
+  const digits = (env.WHATSAPP_ORDER_NUMBER ?? DEFAULT_WHATSAPP).replace(/[^0-9]/g, "");
+  return digits.length >= 8 ? digits : DEFAULT_WHATSAPP;
+}
+
+function configStatus(env: Env): ConfigStatus {
+  const cjUser = (env.CJ_MCP_USER ?? "").trim();
+  const cjToken = (env.CJ_MCP_ACCESS_TOKEN ?? env.CJ_API_KEY ?? "").trim();
+  const aeKey = (env.ALIEXPRESS_APP_KEY ?? "").trim();
+  const aeSecret = (env.ALIEXPRESS_APP_SECRET ?? "").trim();
+  const model = env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+
+  return {
+    gemini: {
+      key: "GEMINI_API_KEY",
+      configured: Boolean(env.GEMINI_API_KEY),
+      detail: env.GEMINI_API_KEY ? `model ${model}` : "tiada — intent guna heuristik",
+    },
+    cj: {
+      key: "CJ_API_KEY",
+      configured: Boolean(cjUser && cjToken),
+      detail:
+        cjUser && cjToken
+          ? `akaun ${cjUser}`
+          : "tiada — CJ guna katalog demo",
+    },
+    aliexpress: {
+      key: "ALIEXPRESS_APP_KEY",
+      configured: Boolean(aeKey && aeSecret),
+      detail:
+        aeKey && aeSecret
+          ? "kredensial ada · perlu kebenaran Affiliate API"
+          : "tiada — AE guna katalog demo",
+    },
+    whatsapp: {
+      key: "WHATSAPP_ORDER_NUMBER",
+      configured: true,
+      detail: `+${whatsappNumber(env)}`,
+    },
+    pricing: pricingFromEnv(env),
+  };
+}
+
+/**
+ * Margin = (supplier price + supplier shipping) * pct + flat.
+ * Shipping is passed through at cost; the unit price carries the margin so the
+ * landed total always equals supplier total + margin.
+ */
+function applyMargin(
+  supplierPrice: number,
+  supplierShipping: number,
+  pricing: Pricing,
+): { supplier_price: number; supplier_total: number; price: number; total: number; margin: number } {
+  const supplierTotal = round2(supplierPrice + supplierShipping);
+  const margin = round2(supplierTotal * (pricing.markup_pct / 100) + pricing.flat_myr);
+  const price = round2(supplierPrice + margin);
+  return {
+    supplier_price: round2(supplierPrice),
+    supplier_total: supplierTotal,
+    price,
+    total: round2(price + supplierShipping),
+    margin: round2(price - supplierPrice),
+  };
+}
+
+function whatsappOrderUrl(env: Env, product: Product, total: number): string {
+  const text = [
+    "Saya nak order:",
+    `1) ${product.title}`,
+    `ID: ${product.id}`,
+    `Sumber: ${product.source_label}`,
+    `Harga: ${money(total)} (termasuk pos)`,
+  ].join("\n");
+  return `https://wa.me/${whatsappNumber(env)}?text=${encodeURIComponent(text)}`;
+}
+
+function priceProduct(
+  product: Product,
+  env: Env,
+  pricing: Pricing,
+  query: string,
+): PricedProduct {
+  const margin = applyMargin(
+    product.price_myr,
+    product.shipping.cost_myr,
+    pricing,
+  );
+  const params = new URLSearchParams({
+    source: product.source,
+    id: product.id,
+    title: product.title.slice(0, 120),
+    base: margin.supplier_total.toFixed(2),
+    q: query,
+  });
+
+  return {
+    ...product,
+    price_myr: margin.price,
+    total_myr: margin.total,
+    supplier_price_myr: margin.supplier_price,
+    supplier_total_myr: margin.supplier_total,
+    margin_myr: margin.margin,
+    checkout_url: `/checkout?${params.toString()}`,
+    whatsapp_url: whatsappOrderUrl(env, product, margin.total),
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -558,7 +721,7 @@ function cjImage(raw: string): string | null {
  */
 function cjMcpEndpoint(env: Env): string | null {
   const user = (env.CJ_MCP_USER ?? "").trim();
-  const token = (env.CJ_MCP_ACCESS_TOKEN ?? "").trim();
+  const token = (env.CJ_MCP_ACCESS_TOKEN ?? env.CJ_API_KEY ?? "").trim();
   if (!user || !token) return null;
   return `https://developers.cjdropshipping.com/mcp/API@${user}@CJ:${token}`;
 }
@@ -896,10 +1059,10 @@ async function searchAliExpress(
 /* ------------------------------------------------------------------ */
 
 function applyBudget(
-  items: Product[],
+  items: PricedProduct[],
   cap: number | null,
   basis: "price" | "total",
-): { items: Product[]; removed: number } {
+): { items: PricedProduct[]; removed: number } {
   if (cap === null) return { items, removed: 0 };
   const kept = items.filter((item) =>
     basis === "total" ? item.total_myr <= cap : item.price_myr <= cap,
@@ -910,21 +1073,24 @@ function applyBudget(
 async function runSearch(env: Env, rawQuery: string, limit: number): Promise<SearchPayload> {
   const started = Date.now();
   const fx = fxRate(env);
+  const pricing = pricingFromEnv(env);
+  const config = configStatus(env);
 
   const intent = await extractIntent(env, rawQuery);
   const keyword = intent.keyword || rawQuery;
 
-  // Parallel, non-throwing adapters.
+  // Parallel, non-throwing adapters (supplier-level prices).
   const [cj, aliexpress] = await Promise.all([
     searchCj(env, keyword, fx),
     searchAliExpress(env, keyword, fx),
   ]);
 
-  const merged = [...cj.items, ...aliexpress.items].sort(
-    (a, b) => a.total_myr - b.total_myr,
-  );
+  // Single margin + checkout pass so every source obeys the same rules.
+  const priced = [...cj.items, ...aliexpress.items]
+    .map((item) => priceProduct(item, env, pricing, rawQuery))
+    .sort((a, b) => a.total_myr - b.total_myr);
 
-  const budget = applyBudget(merged, intent.max_price_myr, "price");
+  const budget = applyBudget(priced, intent.max_price_myr, "total");
   const results = budget.items.slice(0, clamp(limit, 1, MAX_RESULTS));
 
   const sources = [cj.report, aliexpress.report];
@@ -936,10 +1102,12 @@ async function runSearch(env: Env, rawQuery: string, limit: number): Promise<Sea
     ok: true,
     query: rawQuery,
     intent,
+    pricing,
+    config,
     budget: {
       max_price_myr: intent.max_price_myr,
       applied: intent.max_price_myr !== null,
-      basis: "price",
+      basis: "total",
       removed: budget.removed,
     },
     results,
@@ -1034,11 +1202,204 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
   display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between}
 .err-box{background:#1a0d0d;border:1px solid #4a1d1d;border-radius:13px;padding:22px}
 .err-box h1{font-size:22px;margin:0 0 8px}
+.margin{font-size:11px;color:#8fa3c4;border-top:1px dashed #1c2b45;padding-top:7px;margin-top:2px}
+.margin b{color:#fbbf24}
+.foot .cta-buy{background:linear-gradient(135deg,#22d3ee,#7dd3fc);color:#04121c;border:0}
+.foot .cta-buy:hover{filter:brightness(1.07)}
+.src-link{font-size:11px;color:#7c93b8;margin-top:2px}
+.status-card{background:#0d1829;border:1px solid #1a2a42;border-radius:13px;padding:16px 18px;margin-top:26px}
+.status-card h3{margin:0 0 10px;font-size:12px;letter-spacing:.8px;text-transform:uppercase;color:#8fa3c4}
+.status-row{display:flex;gap:10px;align-items:baseline;font-size:13px;padding:4px 0;flex-wrap:wrap}
+.status-dot{width:8px;height:8px;border-radius:50%;flex:0 0 auto;display:inline-block}
+.ok-dot{background:#34d399}.warn-dot{background:#fbbf24}
+.status-row code{color:#c7d7ee;font-size:12px}
+.status-row .det{color:#8fa3c4;font-size:12px}
+.status-foot{margin-top:10px;font-size:12px;color:#8fa3c4}
+.checkout{max-width:560px;margin:8px auto 0}
+.checkout .box{background:#0e1a2d;border:1px solid #1c2b45;border-radius:16px;padding:22px}
+.checkout h1{font-size:22px;margin:0 0 4px;line-height:1.25}
+.checkout .oid{color:#8fa3c4;font-size:12.5px;margin-bottom:16px;word-break:break-all}
+.crow{display:flex;justify-content:space-between;gap:12px;padding:7px 0;font-size:14px;border-bottom:1px solid #14243a}
+.crow span:first-child{color:#9db2d3}
+.crow.total{border:0;padding-top:14px;font-size:19px;font-weight:800}
+.wa-btn{display:flex;align-items:center;justify-content:center;gap:9px;margin-top:18px;background:#25d366;color:#04120a;font-weight:800;border-radius:12px;padding:14px;text-decoration:none}
+.wa-btn:hover{filter:brightness(1.05);text-decoration:none}
+.back{display:inline-block;margin-top:14px;font-size:13px;color:#7dd3fc}
+.note{font-size:12px;color:#8fa3c4;margin-top:12px;line-height:1.5}
+.langmenu{position:relative}
+.langmenu summary{list-style:none;cursor:pointer;font-size:12.5px;color:#b9cbe6;background:#101d31;border:1px solid #1e2f4a;border-radius:10px;padding:7px 11px;white-space:nowrap}
+.langmenu summary::-webkit-details-marker{display:none}
+.langmenu[open] summary{border-color:#2c6d8a}
+.langlist{position:absolute;right:0;top:calc(100% + 6px);background:#0e1a2d;border:1px solid #1e2f4a;border-radius:11px;padding:5px;min-width:160px;z-index:20;box-shadow:0 12px 30px rgba(0,0,0,.45)}
+.langlist a{display:block;padding:7px 10px;border-radius:8px;font-size:13px;color:#c7d7ee}
+.langlist a:hover{background:#132441;text-decoration:none}
+.langlist a.active{color:#22d3ee;font-weight:700}
+.top nav{align-items:center}
 `;
 
-function layout(opts: { title: string; description: string; body: string }): string {
+/* ------------------------------------------------------------------ */
+/* i18n (Bahasa Melayu default, English via top-right dropdown)        */
+/* ------------------------------------------------------------------ */
+
+type Lang = "ms" | "en";
+
+const STRINGS: Record<Lang, Record<string, string>> = {
+  ms: {
+    tagline: "enjin carian dropship on-demand",
+    nav_api: "API",
+    nav_status: "Status",
+    lang_name: "Bahasa Melayu",
+    land_h1_a: "Cari produk dropship,",
+    land_h1_b: "terus ikut bajet.",
+    land_lede:
+      "Taip apa yang awak nak dalam bahasa Melayu atau Inggeris. Enjin faham hasrat, cari di CJ Dropshipping & AliExpress serentak, dan susun ikut kos penghantaran sebenar.",
+    search_placeholder: "cth: mini projector bawah RM80",
+    search_aria: "Cari produk",
+    search_btn: "Cari",
+    chip_keyword: "Kata kunci",
+    chip_budget: "Bajet",
+    chip_no_limit: "tiada had",
+    chip_intent: "Intent",
+    engine_heuristic: "heuristik",
+    step1_t: "Faham hasrat",
+    step1_d: "Gemini Flash-Lite tukar ayat biasa jadi kata kunci + had bajet MYR.",
+    step2_t: "Cari serentak",
+    step2_d: "CJ dan AliExpress dipanggil selari, bukan satu-satu.",
+    step3_t: "Margin + order",
+    step3_d: "Kos supplier ditambah margin, setiap produk dapat butang Order.",
+    status_title: "Status sistem",
+    status_live: "aktif",
+    status_missing: "tiada",
+    status_margin_foot:
+      "harga jual = kos supplier + margin, pos di-pass-through.",
+    api_details: "Guna sebagai API (bot / curl)",
+    api_json_details: "JSON untuk bot",
+    results_products: "produk",
+    results_filtered: "ditapis keluar (bajet)",
+    results_margin: "margin",
+    empty_title: "Tiada produk dalam bajet itu",
+    empty_text: "Naikkan bajet, atau cuba kata kunci yang lebih umum.",
+    card_margin: "Margin",
+    card_supplier_cost: "kos supplier",
+    card_total: "Total",
+    card_order: "Order",
+    card_view_on: "Lihat di",
+    card_days: "hari",
+    card_demo: "demo",
+    checkout_supplier: "Harga supplier",
+    checkout_shipping: "Penghantaran",
+    checkout_margin: "Margin",
+    checkout_total: "Jumlah",
+    checkout_wa: "WhatsApp untuk sahkan",
+    checkout_note:
+      "Harga akhir disahkan di WhatsApp sebelum bayar. Kalau produk bertanda demo, harga supplier datang dari katalog demo sehingga kredensial sumber dipasang.",
+    checkout_back: "Kembali ke carian",
+    checkout_product: "Produk",
+    error_title: "Ralat",
+    error_back: "Kembali ke carian",
+    footer_note: "Harga indikatif — sahkan stok & harga di platform sumber.",
+    empty_q: "Taip kata kunci dulu — contoh: mini projector bawah RM80",
+    invalid_query: "Pertanyaan mesti antara 2 hingga 200 aksara.",
+    invalid_checkout: "Parameter checkout tidak sah (source, id, base).",
+    missing_query: "Parameter q diperlukan.",
+    meta_home_title: "MyKiraNiaga — enjin carian dropship on-demand",
+    meta_home_desc:
+      "Cari produk dropship ikut bajet. Gemini faham hasrat, CJ + AliExpress dicari serentak, harga dinormalisasi ke MYR.",
+    meta_search_title: "MyKiraNiaga — carian",
+    meta_search_desc: "Taip kata kunci untuk mula cari produk dropship.",
+    meta_invalid_title: "Pertanyaan tidak sah — MyKiraNiaga",
+    meta_checkout_title: "Checkout tidak sah — MyKiraNiaga",
+    meta_order_desc: "Semak pesanan",
+  },
+  en: {
+    tagline: "on-demand dropshipping search",
+    nav_api: "API",
+    nav_status: "Status",
+    lang_name: "English",
+    land_h1_a: "Find dropship products,",
+    land_h1_b: "straight to your budget.",
+    land_lede:
+      "Type what you want in Malay or English. The engine extracts intent, searches CJ Dropshipping & AliExpress in parallel, and ranks by real shipping cost.",
+    search_placeholder: "e.g. mini projector under RM80",
+    search_aria: "Search products",
+    search_btn: "Search",
+    chip_keyword: "Keyword",
+    chip_budget: "Budget",
+    chip_no_limit: "no limit",
+    chip_intent: "Intent",
+    engine_heuristic: "heuristic",
+    step1_t: "Read intent",
+    step1_d: "Gemini Flash-Lite turns plain language into a keyword + MYR budget.",
+    step2_t: "Search in parallel",
+    step2_d: "CJ and AliExpress are called simultaneously, not one by one.",
+    step3_t: "Margin + order",
+    step3_d: "Supplier cost plus margin, every product gets an Order button.",
+    status_title: "System status",
+    status_live: "live",
+    status_missing: "missing",
+    status_margin_foot:
+      "sell price = supplier cost + margin, shipping passed through.",
+    api_details: "Use as API (bot / curl)",
+    api_json_details: "JSON for bots",
+    results_products: "products",
+    results_filtered: "filtered out (budget)",
+    results_margin: "margin",
+    empty_title: "No products inside that budget",
+    empty_text: "Raise the budget, or try a broader keyword.",
+    card_margin: "Margin",
+    card_supplier_cost: "supplier cost",
+    card_total: "Total",
+    card_order: "Order",
+    card_view_on: "View on",
+    card_days: "days",
+    card_demo: "demo",
+    checkout_supplier: "Supplier price",
+    checkout_shipping: "Shipping",
+    checkout_margin: "Margin",
+    checkout_total: "Total",
+    checkout_wa: "Confirm on WhatsApp",
+    checkout_note:
+      "Final price is confirmed on WhatsApp before payment. Demo rows use the sample catalogue until supplier credentials are set.",
+    checkout_back: "Back to search",
+    checkout_product: "Product",
+    error_title: "Error",
+    error_back: "Back to search",
+    footer_note: "Indicative pricing — confirm stock & price on the source platform.",
+    empty_q: "Type a keyword first — e.g. mini projector under RM80",
+    invalid_query: "Query must be between 2 and 200 characters.",
+    invalid_checkout: "Invalid checkout parameters (source, id, base).",
+    missing_query: "The q parameter is required.",
+    meta_home_title: "MyKiraNiaga — on-demand dropshipping search",
+    meta_home_desc:
+      "Search dropship products by budget. Gemini reads intent, CJ + AliExpress searched in parallel, prices normalised to MYR.",
+    meta_search_title: "MyKiraNiaga — search",
+    meta_search_desc: "Type a keyword to start searching dropship products.",
+    meta_invalid_title: "Invalid query — MyKiraNiaga",
+    meta_checkout_title: "Invalid checkout — MyKiraNiaga",
+    meta_order_desc: "Review order",
+  },
+};
+
+function t(lang: Lang, key: string): string {
+  return STRINGS[lang][key] ?? STRINGS.ms[key] ?? key;
+}
+
+function langUrl(fullUrl: string, lang: Lang): string {
+  const url = new URL(fullUrl, "https://mykiraniaga.local");
+  url.searchParams.set("lang", lang);
+  return `${url.pathname}${url.search}`;
+}
+
+function layout(opts: {
+  title: string;
+  description: string;
+  body: string;
+  lang: Lang;
+  currentUrl: string;
+}): string {
+  const { lang } = opts;
   return `<!doctype html>
-<html lang="ms">
+<html lang="${lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1052,39 +1413,68 @@ function layout(opts: { title: string; description: string; body: string }): str
   <header class="top">
     <a class="brand" href="/">
       <span class="logo">MK</span>
-      <span>MyKiraNiaga<small>enjin carian dropship on-demand</small></span>
+      <span>MyKiraNiaga<small>${esc(t(lang, "tagline"))}</small></span>
     </a>
-    <nav><a href="/api">API</a><a href="/health">Status</a></nav>
+    <nav>
+      <a href="/api">${esc(t(lang, "nav_api"))}</a>
+      <a href="/health">${esc(t(lang, "nav_status"))}</a>
+      <details class="langmenu">
+        <summary>${lang === "ms" ? "BM" : "EN"} ▾</summary>
+        <div class="langlist">
+          <a href="${esc(langUrl(opts.currentUrl, "ms"))}" class="${
+            lang === "ms" ? "active" : ""
+          }">Bahasa Melayu</a>
+          <a href="${esc(langUrl(opts.currentUrl, "en"))}" class="${
+            lang === "en" ? "active" : ""
+          }">English</a>
+        </div>
+      </details>
+    </nav>
   </header>
   ${opts.body}
   <footer>
     <span>MyKiraNiaga v${VERSION} · Hono + Cloudflare Workers</span>
-    <span>Harga indikatif — sahkan stok &amp; harga di platform sumber.</span>
+    <span>${esc(t(lang, "footer_note"))}</span>
   </footer>
 </div>
 </body>
 </html>`;
 }
 
-function searchForm(q: string, autofocus: boolean): string {
+function searchForm(q: string, autofocus: boolean, lang: Lang): string {
   return `<form class="search" action="/search" method="get" role="search">
-  <input type="search" name="q" value="${esc(q)}" placeholder="cth: mini projector bawah RM80"
-    aria-label="Cari produk" ${autofocus ? "autofocus" : ""} required minlength="2" maxlength="200">
-  <button type="submit">Cari</button>
+  <input type="hidden" name="lang" value="${lang}">
+  <input type="search" name="q" value="${esc(q)}" placeholder="${esc(
+    t(lang, "search_placeholder"),
+  )}"
+    aria-label="${esc(t(lang, "search_aria"))}" ${
+      autofocus ? "autofocus" : ""
+    } required minlength="2" maxlength="200">
+  <button type="submit">${esc(t(lang, "search_btn"))}</button>
 </form>`;
 }
 
-function intentChips(payload: SearchPayload): string {
+function intentChips(payload: SearchPayload, lang: Lang): string {
   const chips: string[] = [];
-  chips.push(`<span class="chip">Kata kunci: <b>${esc(payload.intent.keyword)}</b></span>`);
   chips.push(
-    payload.intent.max_price_myr === null
-      ? `<span class="chip">Bajet: <b>tiada had</b></span>`
-      : `<span class="chip">Bajet: <b>≤ ${money(payload.intent.max_price_myr)}</b></span>`,
+    `<span class="chip">${esc(t(lang, "chip_keyword"))}: <b>${esc(
+      payload.intent.keyword,
+    )}</b></span>`,
   );
   chips.push(
-    `<span class="chip">Intent: <b>${
-      payload.intent.engine === "gemini" ? "Gemini Flash-Lite" : "heuristik"
+    payload.intent.max_price_myr === null
+      ? `<span class="chip">${esc(t(lang, "chip_budget"))}: <b>${esc(
+          t(lang, "chip_no_limit"),
+        )}</b></span>`
+      : `<span class="chip">${esc(t(lang, "chip_budget"))}: <b>≤ ${money(
+          payload.intent.max_price_myr,
+        )}</b></span>`,
+  );
+  chips.push(
+    `<span class="chip">${esc(t(lang, "chip_intent"))}: <b>${
+      payload.intent.engine === "gemini"
+        ? "Gemini Flash-Lite"
+        : esc(t(lang, "engine_heuristic"))
     }</b></span>`,
   );
   for (const source of payload.meta.sources) {
@@ -1097,37 +1487,51 @@ function intentChips(payload: SearchPayload): string {
             ? "err"
             : "";
     chips.push(
-      `<span class="chip ${cls}">${esc(source.label)}: <b>${esc(source.status)}</b> · ${source.count}</span>`,
+      `<span class="chip ${cls}" title="${esc(source.note ?? "")}">${esc(
+        source.label,
+      )}: <b>${esc(source.status)}</b> · ${source.count}</span>`,
     );
   }
   return `<div class="chips">${chips.join("")}</div>`;
 }
 
-function productCard(product: Product): string {
+function productCard(product: PricedProduct, lang: Lang): string {
   const thumb = product.image
     ? `<img src="${esc(product.image)}" alt="${esc(product.title)}" loading="lazy" referrerpolicy="no-referrer">`
     : `<span class="tile">${esc(SOURCE_META[product.source].short)}</span>`;
 
   const rating =
-    product.rating === null
-      ? ""
-      : ` · ★ ${product.rating.toFixed(1)}`;
+    product.rating === null ? "" : ` · ★ ${product.rating.toFixed(1)}`;
 
   return `<article class="card">
   <div class="thumb">${thumb}</div>
   <div class="body">
     <span class="src ${product.source}">${esc(product.source_label)}${
-      product.demo ? " · demo" : ""
+      product.demo ? ` · ${esc(t(lang, "card_demo"))}` : ""
     }</span>
     <h3 class="title">${esc(product.title)}</h3>
     <div class="price">${money(product.price_myr)}</div>
     <div class="ship">${esc(product.shipping.method)} · ${product.shipping.days_min}–${
       product.shipping.days_max
-    } hari · ${money(product.shipping.cost_myr)}${rating}</div>
+    } ${esc(t(lang, "card_days"))} · ${money(product.shipping.cost_myr)}${rating}</div>
+    <div class="margin">${esc(t(lang, "card_margin"))} <b>${money(
+      product.margin_myr,
+    )}</b> · ${esc(t(lang, "card_supplier_cost"))} ${money(
+      product.supplier_total_myr,
+    )}</div>
     <div class="foot">
-      <span class="total">Total <b>${money(product.total_myr)}</b></span>
-      <a class="cta" href="${esc(product.url)}" target="_blank" rel="noopener nofollow">Lihat →</a>
+      <span class="total">${esc(t(lang, "card_total"))} <b>${money(
+        product.total_myr,
+      )}</b></span>
+      <a class="cta cta-buy" href="${esc(product.checkout_url)}">${esc(
+        t(lang, "card_order"),
+      )} →</a>
     </div>
+    <a class="src-link" href="${esc(
+      product.url,
+    )}" target="_blank" rel="noopener nofollow">${esc(
+      t(lang, "card_view_on"),
+    )} ${esc(product.source_label)}</a>
   </div>
 </article>`;
 }
@@ -1139,81 +1543,196 @@ const EXAMPLES = [
   "car vacuum below $15",
 ];
 
-function landingBody(errorNote?: string): string {
-  return `<h1>Cari produk dropship, <span>terus ikut bajet.</span></h1>
-<p class="lede">Taip apa yang awak nak dalam bahasa Melayu atau Inggeris. Enjin akan faham hasrat,
-cari di CJ Dropshipping &amp; AliExpress secara serentak, dan susun ikut kos penghantaran sebenar.</p>
-${searchForm("", true)}
+function statusPanel(env: Env, lang: Lang): string {
+  const config = configStatus(env);
+  const rows = [config.gemini, config.cj, config.aliexpress, config.whatsapp]
+    .map((item) => {
+      const dot = item.configured ? "ok-dot" : "warn-dot";
+      const mark = item.configured
+        ? t(lang, "status_live")
+        : t(lang, "status_missing");
+      return `<div class="status-row"><span class="status-dot ${dot}"></span><code>${esc(
+        item.key,
+      )}</code><span class="det">${esc(mark)} · ${esc(item.detail)}</span></div>`;
+    })
+    .join("");
+  const p = config.pricing;
+
+  return `<div class="status-card">
+  <h3>${esc(t(lang, "status_title"))}</h3>
+  ${rows}
+  <div class="status-foot">Margin <b>${p.markup_pct}%</b>${
+    p.flat_myr ? ` + ${money(p.flat_myr)}` : ""
+  } · ${esc(t(lang, "status_margin_foot"))}</div>
+</div>`;
+}
+
+function landingBody(env: Env, lang: Lang, errorNote?: string): string {
+  return `<h1>${esc(t(lang, "land_h1_a"))} <span>${esc(
+    t(lang, "land_h1_b"),
+  )}</span></h1>
+<p class="lede">${esc(t(lang, "land_lede"))}</p>
+${searchForm("", true, lang)}
 ${errorNote ? `<div class="chips"><span class="chip err">${esc(errorNote)}</span></div>` : ""}
 <div class="chips">
 ${EXAMPLES.map(
   (example) =>
-    `<a class="chip" href="/search?q=${encodeURIComponent(example)}">${esc(example)}</a>`,
+    `<a class="chip" href="/search?q=${encodeURIComponent(example)}&amp;lang=${lang}">${esc(
+      example,
+    )}</a>`,
 ).join("")}
 </div>
 <div class="steps">
-  <div class="step"><b>01</b><h3>Faham hasrat</h3><p>Gemini Flash-Lite tukar ayat biasa jadi kata kunci + had bajet MYR.</p></div>
-  <div class="step"><b>02</b><h3>Cari serentak</h3><p>CJ dan AliExpress dipanggil selari, bukan satu-satu.</p></div>
-  <div class="step"><b>03</b><h3>Normalisasi</h3><p>Harga ke MYR, kaedah pos lalai, jumlah sebenar, tapis bajet.</p></div>
+  <div class="step"><b>01</b><h3>${esc(t(lang, "step1_t"))}</h3><p>${esc(
+    t(lang, "step1_d"),
+  )}</p></div>
+  <div class="step"><b>02</b><h3>${esc(t(lang, "step2_t"))}</h3><p>${esc(
+    t(lang, "step2_d"),
+  )}</p></div>
+  <div class="step"><b>03</b><h3>${esc(t(lang, "step3_t"))}</h3><p>${esc(
+    t(lang, "step3_d"),
+  )}</p></div>
 </div>
+${statusPanel(env, lang)}
 <details class="api">
-  <summary>Guna sebagai API (bot / curl)</summary>
-  <pre>curl "https://mykiraniaga.&lt;subdomain&gt;.workers.dev/api/search?q=mini+projector+bawah+RM80"
-curl -H "Accept: application/json" "https://mykiraniaga.&lt;subdomain&gt;.workers.dev/search?q=earbuds"</pre>
+  <summary>${esc(t(lang, "api_details"))}</summary>
+  <pre>curl "https://mykiraniaga.mykira.workers.dev/api/search?q=mini+projector+bawah+RM80"
+curl -H "Accept: application/json" "https://mykiraniaga.mykira.workers.dev/search?q=earbuds"</pre>
 </details>`;
 }
 
-function resultsBody(payload: SearchPayload): string {
-  const cards = payload.results.map(productCard).join("\n");
-  const jsonHref = `/search?q=${encodeURIComponent(payload.query)}&amp;format=json`;
+function resultsBody(payload: SearchPayload, lang: Lang): string {
+  const cards = payload.results.map((product) => productCard(product, lang)).join("\n");
+  const jsonHref = `/search?q=${encodeURIComponent(payload.query)}&amp;format=json&amp;lang=${lang}`;
 
   const body = payload.results.length
     ? `<div class="grid">${cards}</div>`
     : `<div class="empty">
-        <h2>Tiada produk dalam bajet itu</h2>
-        <p>Naikkan bajet, atau cuba kata kunci yang lebih umum.</p>
+        <h2>${esc(t(lang, "empty_title"))}</h2>
+        <p>${esc(t(lang, "empty_text"))}</p>
         <div class="chips" style="justify-content:center">
           ${EXAMPLES.map(
             (example) =>
-              `<a class="chip" href="/search?q=${encodeURIComponent(example)}">${esc(example)}</a>`,
+              `<a class="chip" href="/search?q=${encodeURIComponent(
+                example,
+              )}&amp;lang=${lang}">${esc(example)}</a>`,
           ).join("")}
         </div>
       </div>`;
 
-  return `${searchForm(payload.query, false)}
-${intentChips(payload)}
+  return `${searchForm(payload.query, false, lang)}
+${intentChips(payload, lang)}
 <div class="summary">
-  <span><b>${payload.meta.count}</b> produk</span>
-  ${payload.budget.applied ? `<span>· ${payload.budget.removed} ditapis keluar (bajet)</span>` : ""}
+  <span><b>${payload.meta.count}</b> ${esc(t(lang, "results_products"))}</span>
+  ${
+    payload.budget.applied
+      ? `<span>· ${payload.budget.removed} ${esc(t(lang, "results_filtered"))}</span>`
+      : ""
+  }
+  <span>· ${esc(t(lang, "results_margin"))} ${payload.pricing.markup_pct}%${
+    payload.pricing.flat_myr ? ` + ${money(payload.pricing.flat_myr)}` : ""
+  }</span>
   <span>· ${payload.meta.timing_ms} ms</span>
   <span>· <a href="${jsonHref}">JSON</a></span>
 </div>
 ${body}
 <details class="api">
-  <summary>JSON untuk bot</summary>
+  <summary>${esc(t(lang, "api_json_details"))}</summary>
   <pre>GET /api/search?q=${esc(encodeURIComponent(payload.query))}
 Accept: application/json</pre>
 </details>`;
 }
 
-function errorBody(message: string): string {
+function errorBody(message: string, lang: Lang): string {
   return `<div class="err-box">
-  <h1>Ralat</h1>
+  <h1>${esc(t(lang, "error_title"))}</h1>
   <p style="color:#fca5a5;margin:0 0 14px">${esc(message)}</p>
-  <a class="chip" href="/">Kembali ke carian</a>
+  <a class="chip" href="/">${esc(t(lang, "error_back"))}</a>
 </div>`;
+}
+
+interface CheckoutOrder {
+  id: string;
+  source: SourceId;
+  source_label: string;
+  title: string;
+  supplier_price_myr: number;
+  supplier_total_myr: number;
+  shipping_myr: number;
+  shipping_method: string;
+  margin_myr: number;
+  total_myr: number;
+  markup_pct: number;
+  flat_myr: number;
+  whatsapp_url: string;
+}
+
+function checkoutBody(order: CheckoutOrder, query: string, lang: Lang): string {
+  const back = query ? `/search?q=${encodeURIComponent(query)}&lang=${lang}` : "/";
+  const marginLabel = `${order.markup_pct}%${
+    order.flat_myr ? ` + ${money(order.flat_myr)}` : ""
+  }`;
+
+  return `<div class="checkout"><div class="box">
+  <h1>${esc(order.title)}</h1>
+  <div class="oid">ID ${esc(order.id)} · ${esc(order.source_label)}</div>
+  <div class="crow"><span>${esc(t(lang, "checkout_supplier"))}</span><span>${money(
+    order.supplier_price_myr,
+  )}</span></div>
+  <div class="crow"><span>${esc(t(lang, "checkout_shipping"))} (${esc(
+    order.shipping_method,
+  )})</span><span>${money(order.shipping_myr)}</span></div>
+  <div class="crow"><span>${esc(t(lang, "checkout_margin"))} ${esc(
+    marginLabel,
+  )}</span><span>${money(order.margin_myr)}</span></div>
+  <div class="crow total"><span>${esc(t(lang, "checkout_total"))}</span><span>${money(
+    order.total_myr,
+  )}</span></div>
+  <a class="wa-btn" href="${esc(
+    order.whatsapp_url,
+  )}" target="_blank" rel="noopener">${esc(t(lang, "checkout_wa"))}</a>
+  <p class="note">${esc(t(lang, "checkout_note"))}</p>
+  <a class="back" href="${esc(back)}">← ${esc(t(lang, "checkout_back"))}</a>
+</div></div>`;
 }
 
 /* ------------------------------------------------------------------ */
 /* App                                                                 */
 /* ------------------------------------------------------------------ */
 
+function cookieValue(c: Context, name: string): string {
+  const header = c.req.header("cookie") ?? "";
+  for (const part of header.split(";")) {
+    const trimmed = part.trim();
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    if (trimmed.slice(0, eq) === name) {
+      return decodeURIComponent(trimmed.slice(eq + 1));
+    }
+  }
+  return "";
+}
+
+function langFrom(c: Context): Lang {
+  const requested = (c.req.query("lang") ?? "").toLowerCase();
+  if (requested === "ms" || requested === "en") return requested;
+  return cookieValue(c, "mkn_lang").toLowerCase() === "en" ? "en" : "ms";
+}
+
 const app = new Hono<{ Bindings: Env }>();
 
 app.use("*", async (c, next) => {
+  const requested = (c.req.query("lang") ?? "").toLowerCase();
   await next();
+  if (requested === "ms" || requested === "en") {
+    c.header(
+      "Set-Cookie",
+      `mkn_lang=${requested}; Path=/; Max-Age=2592000; SameSite=Lax`,
+    );
+  }
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  c.header("Vary", "Accept, Cookie");
 });
 
 app.use("/api/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"], maxAge: 86400 }));
@@ -1224,12 +1743,14 @@ app.get("/", (c) => {
       service: SERVICE,
       version: VERSION,
       description:
-        "On-demand dropshipping search engine. Gemini Flash-Lite intent extraction, parallel CJ + AliExpress lookup, MYR normalisation and budget filtering.",
+        "On-demand dropshipping search engine. Gemini Flash-Lite intent extraction, parallel CJ + AliExpress lookup, MYR normalisation, profit margin and WhatsApp checkout handoff.",
       endpoints: {
         "GET /search?q=": "HTML for humans, JSON when ?format=json or Accept: application/json",
         "GET /api/search?q=": "JSON only",
-        "GET /health": "health probe",
+        "GET /checkout?source=&id=&base=": "order summary + WhatsApp handoff",
+        "GET /health": "health probe + key status",
       },
+      config: configStatus(c.env),
       examples: [
         "/search?q=mini%20projector%20bawah%20RM80",
         "/api/search?q=wireless%20earbuds%20under%20RM50",
@@ -1237,42 +1758,52 @@ app.get("/", (c) => {
     });
   }
 
+  const lang = langFrom(c);
   return c.html(
     layout({
-      title: "MyKiraNiaga — enjin carian dropship on-demand",
-      description:
-        "Cari produk dropship ikut bajet. Gemini faham hasrat, CJ + AliExpress dicari serentak, harga dinormalisasi ke MYR.",
-      body: landingBody(),
+      title: t(lang, "meta_home_title"),
+      description: t(lang, "meta_home_desc"),
+      body: landingBody(c.env, lang),
+      lang,
+      currentUrl: c.req.url,
     }),
   );
 });
 
 app.get("/search", async (c) => {
+  const lang = langFrom(c);
   const rawQuery = (c.req.query("q") ?? "").trim();
 
   if (!rawQuery) {
     if (wantsJson(c)) {
-      return c.json({ ok: false, error: "missing_query", message: "Parameter q diperlukan." }, 400);
+      return c.json(
+        { ok: false, error: "missing_query", message: t(lang, "missing_query") },
+        400,
+      );
     }
     return c.html(
       layout({
-        title: "MyKiraNiaga — carian",
-        description: "Taip kata kunci untuk mula cari produk dropship.",
-        body: landingBody("Taip kata kunci dulu — contoh: mini projector bawah RM80"),
+        title: t(lang, "meta_search_title"),
+        description: t(lang, "meta_search_desc"),
+        body: landingBody(c.env, lang, t(lang, "empty_q")),
+        lang,
+        currentUrl: c.req.url,
       }),
     );
   }
 
   if (rawQuery.length < 2 || rawQuery.length > 200) {
-    const message = "Pertanyaan mesti antara 2 hingga 200 aksara.";
+    const message = t(lang, "invalid_query");
     if (wantsJson(c)) {
       return c.json({ ok: false, error: "invalid_query", message }, 400);
     }
     return c.html(
       layout({
-        title: "Pertanyaan tidak sah — MyKiraNiaga",
+        title: t(lang, "meta_invalid_title"),
         description: message,
-        body: errorBody(message),
+        body: errorBody(message, lang),
+        lang,
+        currentUrl: c.req.url,
       }),
       400,
     );
@@ -1285,15 +1816,112 @@ app.get("/search", async (c) => {
 
   if (wantsJson(c)) return c.json(payload);
 
+  const budgetSuffix =
+    payload.intent.max_price_myr === null
+      ? ""
+      : lang === "en"
+        ? ` under ${money(payload.intent.max_price_myr)}`
+        : ` bawah ${money(payload.intent.max_price_myr)}`;
+  const description =
+    lang === "en"
+      ? `Dropship results for "${payload.intent.keyword}"${budgetSuffix}.`
+      : `Hasil carian dropship untuk "${payload.intent.keyword}"${budgetSuffix}.`;
+
   return c.html(
     layout({
       title: `${payload.intent.keyword} — MyKiraNiaga`,
-      description: `Hasil carian dropship untuk "${payload.intent.keyword}"${
-        payload.intent.max_price_myr === null
-          ? ""
-          : ` bawah ${money(payload.intent.max_price_myr)}`
-      }.`,
-      body: resultsBody(payload),
+      description,
+      body: resultsBody(payload, lang),
+      lang,
+      currentUrl: c.req.url,
+    }),
+  );
+});
+
+app.get("/checkout", (c) => {
+  const lang = langFrom(c);
+  const source = (c.req.query("source") ?? "").toLowerCase();
+  const id = (c.req.query("id") ?? "").trim().slice(0, 140);
+  const query = (c.req.query("q") ?? "").trim().slice(0, 200);
+  const base = Number(c.req.query("base"));
+  const validSource = source === "cj" || source === "aliexpress";
+
+  if (!validSource || !id || !Number.isFinite(base) || base <= 0 || base > 100000) {
+    const message = t(lang, "invalid_checkout");
+    if (wantsJson(c)) {
+      return c.json({ ok: false, error: "invalid_checkout", message }, 400);
+    }
+    return c.html(
+      layout({
+        title: t(lang, "meta_checkout_title"),
+        description: message,
+        body: errorBody(message, lang),
+        lang,
+        currentUrl: c.req.url,
+      }),
+      400,
+    );
+  }
+
+  const sourceId = source as SourceId;
+  const shipping = DEFAULT_SHIPPING[sourceId];
+  const pricing = pricingFromEnv(c.env);
+  // `base` is the supplier landed total carried by the result card.
+  const supplierPrice = round2(Math.max(base - shipping.cost_myr, 0.01));
+  const margin = applyMargin(supplierPrice, shipping.cost_myr, pricing);
+  const title =
+    (c.req.query("title") ?? "").trim().slice(0, 140) ||
+    `${t(lang, "checkout_product")} ${id}`;
+  const label = SOURCE_META[sourceId].label;
+
+  const waText =
+    lang === "en"
+      ? [
+          "I want to order:",
+          `1) ${title}`,
+          `ID: ${id}`,
+          `Source: ${label}`,
+          `Total: ${money(margin.total)} (incl. shipping)`,
+        ].join("\n")
+      : [
+          "Saya nak order:",
+          `1) ${title}`,
+          `ID: ${id}`,
+          `Sumber: ${label}`,
+          `Jumlah: ${money(margin.total)} (termasuk pos)`,
+        ].join("\n");
+
+  const order: CheckoutOrder = {
+    id,
+    source: sourceId,
+    source_label: label,
+    title,
+    supplier_price_myr: margin.supplier_price,
+    supplier_total_myr: margin.supplier_total,
+    shipping_myr: shipping.cost_myr,
+    shipping_method: shipping.method,
+    margin_myr: margin.margin,
+    total_myr: margin.total,
+    markup_pct: pricing.markup_pct,
+    flat_myr: pricing.flat_myr,
+    whatsapp_url: `https://wa.me/${whatsappNumber(c.env)}?text=${encodeURIComponent(
+      waText,
+    )}`,
+  };
+
+  c.header("Cache-Control", "no-store");
+
+  if (wantsJson(c)) return c.json({ ok: true, order, pricing });
+
+  return c.html(
+    layout({
+      title: `${id} — MyKiraNiaga`,
+      description: `${t(lang, "meta_order_desc")}: ${title} (${money(
+        order.total_myr,
+      )}).`,
+      body: checkoutBody(order, query, lang),
+      lang,
+      currentUrl: c.req.url,
     }),
   );
 });
@@ -1305,7 +1933,7 @@ app.get("/api/search", async (c) => {
       {
         ok: false,
         error: "invalid_query",
-        message: "Parameter q diperlukan (2-200 aksara).",
+        message: "Parameter q diperlukan (2-200 aksara) / q is required (2-200 chars).",
       },
       400,
     );
@@ -1324,15 +1952,19 @@ app.get("/api", (c) =>
     endpoints: {
       "GET /search?q=&format=json": "search (content negotiated)",
       "GET /api/search?q=": "search (JSON)",
+      "GET /checkout?source=&id=&base=": "checkout summary (HTML or JSON)",
       "GET /health": "health",
     },
     params: {
       q: "query string, 2-200 chars",
       format: "json | html (optional)",
+      lang: "ms | en (optional, default ms)",
       limit: `1-${MAX_RESULTS} (default 24)`,
     },
     response_fields: {
       intent: ["keyword", "max_price_myr", "engine", "model", "note"],
+      pricing: ["markup_pct", "flat_myr"],
+      config: ["gemini", "cj", "aliexpress", "whatsapp", "pricing"],
       budget: ["max_price_myr", "applied", "basis", "removed"],
       results: [
         "id",
@@ -1344,6 +1976,11 @@ app.get("/api", (c) =>
         "image",
         "url",
         "demo",
+        "supplier_price_myr",
+        "supplier_total_myr",
+        "margin_myr",
+        "checkout_url",
+        "whatsapp_url",
       ],
       meta: ["timing_ms", "count", "partial", "sources"],
     },
@@ -1356,42 +1993,52 @@ app.get("/health", (c) =>
     service: SERVICE,
     version: VERSION,
     time: new Date().toISOString(),
-    gemini_configured: Boolean(c.env.GEMINI_API_KEY),
-    cj_configured: Boolean(
-      (c.env.CJ_MCP_USER && c.env.CJ_MCP_ACCESS_TOKEN) || c.env.CJ_ACCESS_TOKEN,
-    ),
-    aliexpress_configured: Boolean(
-      c.env.ALIEXPRESS_APP_KEY && c.env.ALIEXPRESS_APP_SECRET,
-    ),
+    keys: configStatus(c.env),
+    margin: pricingFromEnv(c.env),
+    whatsapp: `+${whatsappNumber(c.env)}`,
   }),
 );
 
 app.get("/robots.txt", (c) => c.text("User-agent: *\nAllow: /\n"));
 
 app.notFound((c) => {
+  const lang = langFrom(c);
   if (wantsJson(c)) {
     return c.json({ ok: false, error: "not_found" }, 404);
   }
   return c.html(
     layout({
-      title: "Tidak dijumpai — MyKiraNiaga",
-      description: "Halaman tidak dijumpai.",
-      body: errorBody("Halaman tidak dijumpai."),
+      title: lang === "en" ? "Not found — MyKiraNiaga" : "Tidak dijumpai — MyKiraNiaga",
+      description: lang === "en" ? "Page not found." : "Halaman tidak dijumpai.",
+      body: errorBody(
+        lang === "en" ? "Page not found." : "Halaman tidak dijumpai.",
+        lang,
+      ),
+      lang,
+      currentUrl: c.req.url,
     }),
     404,
   );
 });
 
 app.onError((error, c) => {
-  const message = error instanceof Error ? error.message : "Ralat tidak diketahui";
+  const lang = langFrom(c);
+  const message =
+    error instanceof Error
+      ? error.message
+      : lang === "en"
+        ? "Unknown error"
+        : "Ralat tidak diketahui";
   if (wantsJson(c)) {
     return c.json({ ok: false, error: "internal_error", message }, 500);
   }
   return c.html(
     layout({
-      title: "Ralat — MyKiraNiaga",
+      title: lang === "en" ? "Error — MyKiraNiaga" : "Ralat — MyKiraNiaga",
       description: message,
-      body: errorBody(message),
+      body: errorBody(message, lang),
+      lang,
+      currentUrl: c.req.url,
     }),
     500,
   );
