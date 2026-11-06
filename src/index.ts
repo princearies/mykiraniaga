@@ -144,6 +144,8 @@ interface ConfigStatus {
 interface Intent {
   keyword: string;
   max_price_myr: number | null;
+  /** Chat-only: specs kept out of the supplier query. */
+  filters?: string[];
   engine: "gemini" | "heuristic";
   model?: string;
   note?: string;
@@ -184,6 +186,11 @@ interface SearchPayload {
     count: number;
     partial: boolean;
     sources: SourceReport[];
+    floor?: {
+      min_total_myr: number | null;
+      removed: number;
+      skipped: boolean;
+    };
   };
 }
 
@@ -530,7 +537,7 @@ function heuristicIntent(query: string): Intent {
       " ",
     )
     .replace(
-      /\b(?:cari|search|find|tolong|please|saya|nak|want|dropship|untuk|for|murah|cheap)\b/gi,
+      /\b(?:cari|carikan|search|find|tolong|please|saya|nak|want|dropship|untuk|for|murah|cheap|tunjuk|tunjukkan|senarai|senaraikan|show|recommend|cadang|cadangkan|syorkan|beli)\b/gi,
       " ",
     )
     .replace(/\s+/g, " ")
@@ -687,9 +694,18 @@ function demoProducts(source: SourceId, keyword: string, fx: number): Product[] 
       ? `https://www.cjdropshipping.com/search.html?productNameEn=${encodeURIComponent(baseKeyword)}`
       : `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(baseKeyword)}`;
 
+  const floorRule = categoryRuleFor(baseKeyword);
+
   return suffixes.map((suffix, index) => {
     const priceUsd = 3.8 + ((seed >> (index * 3)) % 26) + index * 2.15;
-    const price = round2(priceUsd * fx);
+    let price = round2(priceUsd * fx);
+    // Demo data should look like the real category, not accessories.
+    if (floorRule) {
+      const floor = round2(
+        floorRule.min_total_myr * (1.15 + index * 0.2) + (seed % 40),
+      );
+      if (price < floor) price = floor;
+    }
     return {
       id: `${source}-demo-${hash(`${source}${baseKeyword}${index}`) % 1000000}`,
       source,
@@ -1223,6 +1239,86 @@ function applyBudget(
   return { items: kept, removed: items.length - kept.length };
 }
 
+interface CategoryRule {
+  test: RegExp;
+  min_total_myr: number;
+  exclude?: RegExp;
+}
+
+/** High-value categories: a floor keeps accessories (stands, covers) out. */
+const CATEGORY_RULES: CategoryRule[] = [
+  {
+    test: /\b(laptop|notebook|macbook|ultrabook)\b/i,
+    min_total_myr: 300,
+    exclude:
+      /\b(case|cover|sleeve|skin|stand|mount|holder|bag|mousepad|mat|sticker|dock|charger|adapter|cooling|pad)\b/i,
+  },
+  {
+    test: /\b(monitor|display)\b/i,
+    min_total_myr: 250,
+    exclude: /\b(stand|mount|arm|cover|cleaner)\b/i,
+  },
+  {
+    test: /\b(smartphone|phone|iphone|android)\b/i,
+    min_total_myr: 250,
+    exclude: /\b(case|cover|glass|tempered|holder|ring|strap)\b/i,
+  },
+  {
+    test: /\b(tablet|ipad)\b/i,
+    min_total_myr: 200,
+    exclude: /\b(case|cover|sleeve|stand)\b/i,
+  },
+  {
+    test: /\b(camera|lens)\b/i,
+    min_total_myr: 150,
+    exclude: /\b(strap|bag|case|cover|cap|filter)\b/i,
+  },
+  {
+    test: /\b(projector)\b/i,
+    min_total_myr: 100,
+    exclude: /\b(mount|screen|stand|bag)\b/i,
+  },
+  {
+    test: /\b(gpu|graphics card|rtx|gtx)\b/i,
+    min_total_myr: 200,
+  },
+];
+
+function categoryRuleFor(keyword: string): CategoryRule | null {
+  for (const rule of CATEGORY_RULES) {
+    if (rule.test.test(keyword)) return rule;
+  }
+  return null;
+}
+
+function applyCategoryFloor(
+  items: PricedProduct[],
+  keyword: string,
+  cap: number | null,
+): { items: PricedProduct[]; min_total_myr: number | null; removed: number; skipped: boolean } {
+  const rule = categoryRuleFor(keyword);
+  if (!rule) {
+    return { items, min_total_myr: null, removed: 0, skipped: false };
+  }
+  // A budget below the floor wins: the user explicitly asked for cheap items.
+  if (cap !== null && cap < rule.min_total_myr) {
+    return { items, min_total_myr: rule.min_total_myr, removed: 0, skipped: true };
+  }
+
+  const kept = items.filter(
+    (item) =>
+      item.total_myr >= rule.min_total_myr &&
+      !(rule.exclude ? rule.exclude.test(item.title) : false),
+  );
+
+  return {
+    items: kept,
+    min_total_myr: rule.min_total_myr,
+    removed: items.length - kept.length,
+    skipped: false,
+  };
+}
+
 async function runSearchWithIntent(
   env: Env,
   rawQuery: string,
@@ -1247,7 +1343,8 @@ async function runSearchWithIntent(
     .map((item) => priceProduct(item, env, pricing, rawQuery))
     .sort((a, b) => a.total_myr - b.total_myr);
 
-  const budget = applyBudget(priced, intent.max_price_myr, "total");
+  const floor = applyCategoryFloor(priced, keyword, intent.max_price_myr);
+  const budget = applyBudget(floor.items, intent.max_price_myr, "total");
   const results = budget.items.slice(0, clamp(limit, 1, MAX_RESULTS));
 
   const sources = [cj.report, aliexpress.report];
@@ -1276,6 +1373,11 @@ async function runSearchWithIntent(
       count: results.length,
       partial,
       sources,
+      floor: {
+        min_total_myr: floor.min_total_myr,
+        removed: floor.removed,
+        skipped: floor.skipped,
+      },
     },
   };
 }
@@ -1297,6 +1399,10 @@ interface ChatResult {
   reply: string;
   keyword: string | null;
   max_price_myr: number | null;
+  /** Specs/attributes kept OUT of the supplier query (nvidia, ryzen 7, 16gb…). */
+  filters: string[];
+  /** True when the user explicitly asked to see products now. */
+  explicit: boolean;
   ready: boolean;
   engine: "gemini" | "heuristic";
   model?: string;
@@ -1304,6 +1410,123 @@ interface ChatResult {
 }
 
 const CHAT_MAX_TURNS = 12;
+
+/** Attribute tokens that must never leak into the API search string. */
+const SPEC_TOKENS = [
+  "nvidia",
+  "rtx",
+  "gtx",
+  "radeon",
+  "ryzen",
+  "intel",
+  "core i3",
+  "core i5",
+  "core i7",
+  "core i9",
+  "i5",
+  "i7",
+  "i9",
+  "ssd",
+  "hdd",
+  "nvme",
+  "8gb",
+  "16gb",
+  "32gb",
+  "oled",
+  "ips",
+  "144hz",
+  "120hz",
+  "touchscreen",
+  "bluetooth",
+  "wireless",
+  "waterproof",
+  "stainless",
+  "cotton",
+  "leather",
+  "samsung",
+  "xiaomi",
+  "asus",
+  "lenovo",
+  "dell",
+  "acer",
+];
+
+const PRODUCT_MODIFIERS = [
+  "gaming",
+  "mini",
+  "portable",
+  "wireless",
+  "smart",
+  "best",
+  "cheap",
+  "murah",
+  "premium",
+  "professional",
+  "original",
+  "new",
+  "rechargeable",
+  "foldable",
+  "compact",
+  "bluetooth",
+];
+
+/** Reduce a keyword to the base product noun ("gaming laptop" -> "laptop"). */
+function baseProductNoun(keyword: string): string {
+  const words = keyword.toLowerCase().split(/\s+/).filter(Boolean);
+  const kept = words.filter((word) => !PRODUCT_MODIFIERS.includes(word));
+  const result = (kept.length ? kept : words).join(" ").trim();
+  return result || keyword;
+}
+
+const SEARCH_VERBS =
+  /\b(cari|carikan|tunjuk|tunjukkan|senarai|senaraikan|show|find|search|recommend|cadang|cadangkan|syorkan|beli|nak\s+beli)\b/i;
+
+function extractFilters(text: string): string[] {
+  const lower = text.toLowerCase();
+  const hits: string[] = [];
+  for (const token of SPEC_TOKENS) {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i").test(lower)) {
+      if (!hits.includes(token)) hits.push(token);
+    }
+  }
+  return hits.slice(0, 6);
+}
+
+function parseFilters(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const item of raw) {
+    const value = str(item).toLowerCase().replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!value || value.length < 2 || out.includes(value)) continue;
+    out.push(value);
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+/** Remove filter tokens from a keyword so the API only receives the product noun. */
+function stripFilters(keyword: string, filters: string[]): string {
+  let out = keyword;
+  for (const filter of filters) {
+    const escaped = filter.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(`(^|\\s)${escaped}(\\s|$)`, "gi"), " ");
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/** Soft re-rank: products whose title matches requested specs float to the top. */
+function rankByFilters(items: PricedProduct[], filters: string[]): PricedProduct[] {
+  if (!filters.length) return items;
+  const score = (item: PricedProduct): number => {
+    const title = item.title.toLowerCase();
+    return filters.reduce(
+      (total, filter) => total + (title.includes(filter) ? 1 : 0),
+      0,
+    );
+  };
+  return [...items].sort((a, b) => score(b) - score(a));
+}
 
 const CHAT_SCHEMA = {
   type: "OBJECT",
@@ -1317,7 +1540,7 @@ const CHAT_SCHEMA = {
       type: "STRING",
       nullable: true,
       description:
-        "English product keyword (2-6 words) once the product is clear, else null. Keep the keyword from earlier turns when the user only adds a budget.",
+        "Main product noun only, in English, 2-4 words (e.g. 'gaming laptop', 'wireless earbuds'). Never include brands, specs, attributes, budget words, currency or numbers.",
     },
     max_price_myr: {
       type: "NUMBER",
@@ -1325,32 +1548,41 @@ const CHAT_SCHEMA = {
       description:
         "Budget ceiling in MYR. Convert USD with x4.72. Null when the user has not given a budget.",
     },
-    ready: {
+    filters: {
+      type: "ARRAY",
+      items: { type: "STRING" },
+      description:
+        "Specs/attributes the user asked for (brand, GPU, CPU, RAM, size, colour). Lowercase tokens such as ['nvidia','rtx 4060','16gb']. These are NOT part of the search query. Empty array when none.",
+    },
+    explicit: {
       type: "BOOLEAN",
       description:
-        "True when a product keyword is clear enough to search now. A budget is optional.",
+        "True ONLY when the user clearly wants to see products right now (cari, tunjuk, show me, recommend, senaraikan, nak beli) or asks for a concrete product to purchase.",
     },
   },
-  required: ["reply", "keyword", "max_price_myr", "ready"],
-  propertyOrdering: ["reply", "keyword", "max_price_myr", "ready"],
+  required: ["reply", "keyword", "max_price_myr", "filters", "explicit"],
+  propertyOrdering: ["reply", "keyword", "max_price_myr", "filters", "explicit"],
 };
 
 function chatSystemPrompt(): string {
   return [
     "You are MyKiraNiaga, a Malaysian dropshipping shopping assistant.",
-    "You keep context across turns and help the user narrow down what to buy.",
+    "You keep context across turns and narrow the request down before searching.",
     "",
-    "Return JSON with: reply, keyword, max_price_myr, ready.",
-    "- reply: 1-2 short sentences in the user's language (Malay or English).",
-    "- keyword: English product words only (2-6 words). NEVER include budget words (budget, cheap, murah, bajet), currency or numbers.",
+    "Return JSON with: reply, keyword, max_price_myr, filters, explicit.",
+    "- reply: 1-2 short sentences, entirely in ONE language matching the user (Malay or English). Never mix languages.",
+    "- keyword: the MAIN PRODUCT NOUN only (2-4 words, English): 'gaming laptop', 'wireless earbuds'. Keep the previous keyword when the user only adds a spec or a budget. Never include brands, specs, attributes, budget words, currency or numbers.",
+    "- filters: specs/attributes the user wants (brand, GPU, CPU, RAM, size, colour) as lowercase tokens. These are NEVER part of the search query.",
     "- max_price_myr: numeric MYR budget (USD x4.72); null if not given.",
-    "- ready: true as soon as the product keyword is clear. A budget is OPTIONAL and must never block a search.",
+    "- explicit: true ONLY when the user clearly wants to see products now (cari, tunjuk, show me, recommend, senaraikan, nak beli) or asks for a concrete product to purchase.",
     "",
     "Conversation rules:",
-    "- If the user only gives a budget, keep the previous keyword and set ready=true.",
-    "- If the product is still vague, ask ONE short clarifying question and ready=false.",
+    "- Do NOT confirm a search just because the product is known. First ask for a budget or a key requirement.",
+    "- If the user only adds a spec (e.g. 'ada nvidia'), acknowledge that spec naturally and ask for a budget. Do NOT announce that you are searching.",
+    "- Once the product and a budget (or an explicit request) exist, confirm the search briefly.",
+    "- If the product is still vague, ask ONE short clarifying question.",
     "- Never invent prices, stock or shipping.",
-    "- Do not write markdown, emojis or lists longer than one line.",
+    "- No markdown, emojis or multi-line lists.",
   ].join("\n");
 }
 
@@ -1382,41 +1614,80 @@ function cleanKeyword(text: string): string | null {
 }
 
 function heuristicChat(messages: ChatMessage[], lang: Lang): ChatResult {
-  const userTurns = messages.filter((m) => m.role === "user");
+  const userTurns = messages.filter((message) => message.role === "user");
   const last = userTurns[userTurns.length - 1]?.content ?? "";
 
   let keyword: string | null = null;
   let budget: number | null = null;
+  const filters: string[] = [];
 
   for (let i = userTurns.length - 1; i >= 0; i -= 1) {
-    const parsed = heuristicIntent(userTurns[i].content);
+    const content = userTurns[i].content;
+    const parsed = heuristicIntent(content);
+
     if (budget === null && parsed.max_price_myr !== null) {
       budget = parsed.max_price_myr;
     }
-    if (keyword === null) {
-      const candidate = cleanKeyword(userTurns[i].content);
-      if (candidate) keyword = candidate;
+
+    for (const filter of extractFilters(content)) {
+      if (!filters.includes(filter) && filters.length < 6) filters.push(filter);
     }
-    if (keyword && budget !== null) break;
+
+    const explicitHere = SEARCH_VERBS.test(content);
+    const filtersHere = extractFilters(content);
+    if (!keyword && (filtersHere.length === 0 || explicitHere)) {
+      const candidate = cleanKeyword(content);
+      if (candidate) {
+        const stripped = stripFilters(candidate, filtersHere);
+        if (stripped.length >= 3) keyword = baseProductNoun(stripped);
+      }
+    }
   }
 
-  const ready = Boolean(keyword);
-  const reply = !ready
-    ? lang === "en"
-      ? "What product are you looking for? Give me a keyword or a category."
-      : "Awak nak cari produk apa? Bagi kata kunci atau kategori dulu."
-    : budget === null
-      ? lang === "en"
-        ? `Got it — looking for "${keyword}". Any maximum budget?`
-        : `Baik, saya cari "${keyword}". Ada bajet maksimum?`
-      : lang === "en"
-        ? `Searching "${keyword}" under ${money(budget)}.`
-        : `Mencari "${keyword}" bawah ${money(budget)}.`;
+  const explicit = SEARCH_VERBS.test(last);
+  const ready = Boolean(keyword) && (explicit || budget !== null);
+
+  let reply: string;
+  if (!keyword) {
+    reply =
+      lang === "en"
+        ? "What product are you looking for? Give me a keyword or a category."
+        : "Awak nak cari produk apa? Bagi kata kunci atau kategori dulu.";
+  } else if (!ready && filters.length > 0 && budget === null) {
+    reply =
+      lang === "en"
+        ? `Got it — you want ${filters.join(", ")}. Any specific budget?`
+        : `Faham, nak ${filters.join(", ")}. Ada bajet khusus?`;
+  } else if (!ready) {
+    reply =
+      lang === "en"
+        ? `Noted — ${keyword}. Any maximum budget?`
+        : `Baik, ${keyword}. Ada bajet maksimum?`;
+  } else {
+    const budgetPart =
+      budget === null
+        ? ""
+        : lang === "en"
+          ? ` under ${money(budget)}`
+          : ` bawah ${money(budget)}`;
+    const filterPart =
+      filters.length > 0
+        ? lang === "en"
+          ? ` with ${filters.join(", ")}`
+          : ` dengan ${filters.join(", ")}`
+        : "";
+    reply =
+      lang === "en"
+        ? `Searching ${keyword}${budgetPart}${filterPart}.`
+        : `Mencari ${keyword}${budgetPart}${filterPart}.`;
+  }
 
   return {
     reply,
     keyword,
     max_price_myr: budget,
+    filters,
+    explicit,
     ready,
     engine: "heuristic",
     note: last ? undefined : "no user message",
@@ -1436,7 +1707,7 @@ async function chatTurn(env: Env, messages: ChatMessage[], lang: Lang): Promise<
     parts: [{ text: message.content }],
   }));
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const res = await fetch(
         `${GEMINI_ENDPOINT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
@@ -1448,7 +1719,7 @@ async function chatTurn(env: Env, messages: ChatMessage[], lang: Lang): Promise<
             contents,
             generationConfig: {
               temperature: 0.4,
-              maxOutputTokens: 320,
+              maxOutputTokens: 340,
               responseMimeType: "application/json",
               responseSchema: CHAT_SCHEMA,
             },
@@ -1458,8 +1729,8 @@ async function chatTurn(env: Env, messages: ChatMessage[], lang: Lang): Promise<
       );
 
       if (!res.ok) {
-        if (attempt === 1) {
-          await sleep(350);
+        if (attempt < 3) {
+          await sleep(350 * attempt);
           continue;
         }
         return {
@@ -1476,14 +1747,14 @@ async function chatTurn(env: Env, messages: ChatMessage[], lang: Lang): Promise<
 
       const parsed = parseChatJson(text);
       if (parsed) return { ...parsed, engine: "gemini", model };
-      if (attempt === 1) {
-        await sleep(300);
+      if (attempt < 3) {
+        await sleep(300 * attempt);
         continue;
       }
       return { ...fallback, note: "gemini chat: unparseable response" };
     } catch (error) {
-      if (attempt === 1) {
-        await sleep(300);
+      if (attempt < 3) {
+        await sleep(300 * attempt);
         continue;
       }
       return {
@@ -1506,7 +1777,7 @@ function parseChatJson(text: string): Omit<ChatResult, "engine"> | null {
     .trim();
   const start = cleaned.indexOf("{");
   const end = cleaned.lastIndexOf("}");
-  if (start === -1 || end <= start) return null;
+  if (start <= -1 || end <= start) return null;
 
   let parsed: unknown;
   try {
@@ -1520,22 +1791,31 @@ function parseChatJson(text: string): Omit<ChatResult, "engine"> | null {
   const reply = str(row.reply).slice(0, 400);
   if (!reply) return null;
 
+  const filters = parseFilters(row.filters);
   const keywordRaw = str(row.keyword).replace(/\s+/g, " ").trim();
-  const keyword =
+  let keyword =
     keywordRaw && keywordRaw.toLowerCase() !== "null"
       ? cleanKeyword(keywordRaw)
       : null;
+  if (keyword) {
+    const stripped = stripFilters(keyword, filters);
+    keyword = stripped.length >= 3 ? baseProductNoun(stripped) : null;
+  }
 
   const price = num(row.max_price_myr);
   const maxPrice =
     price !== null && price > 0 && price < 1_000_000 ? round2(price) : null;
 
-  const ready =
-    (row.ready === true || str(row.ready) === "true") && Boolean(keyword);
+  const explicit =
+    row.explicit === true ||
+    str(row.explicit).toLowerCase() === "true" ||
+    str(row.explicit) === "1";
 
-  return { reply, keyword, max_price_myr: maxPrice, ready };
+  // Never search on product alone: explicit request or a budget is required.
+  const ready = Boolean(keyword) && (explicit || maxPrice !== null);
+
+  return { reply, keyword, max_price_myr: maxPrice, filters, explicit, ready };
 }
-
 /* ------------------------------------------------------------------ */
 /* HTML renderer                                                       */
 /* ------------------------------------------------------------------ */
@@ -1659,6 +1939,7 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .statuspage{max-width:720px;margin:8px auto 0}
 .statuspage .status-card{margin-top:0}
 .statuslinks{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;font-size:13px;color:#7c93b8}
+.resultsbar{display:flex;justify-content:flex-end;align-items:center;margin:16px 0 10px}
 .viewswitch{display:inline-flex;gap:4px;background:#0f1b2e;border:1px solid #1e2f4a;border-radius:10px;padding:3px;margin-left:auto}
 .viewbtn{width:32px;height:26px;border:0;border-radius:7px;background:transparent;color:#8fa3c4;cursor:pointer;font-size:14px;line-height:1;display:grid;place-items:center;font-family:inherit}
 .viewbtn:hover{background:#132441;color:#e6eefc}
@@ -1806,6 +2087,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     view_large: "Grid besar",
     view_compact: "Grid kecil",
     view_list: "Senarai",
+    floor_empty:
+      "Semua hasil bawah harga minimum kategori (aksesori) ditapis keluar. Cuba kata kunci lebih spesifik, cth: \"laptop computer\".",
   },
   en: {
     tagline: "on-demand dropshipping search",
@@ -1894,6 +2177,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     view_large: "Large grid",
     view_compact: "Small grid",
     view_list: "List",
+    floor_empty:
+      "Every result below the category price floor (accessories) was filtered out. Try a more specific keyword, e.g. \"laptop computer\".",
   },
 };
 
@@ -2316,15 +2601,20 @@ const VIEW_SCRIPT = `
 
 function resultsBody(payload: SearchPayload, lang: Lang, view: ViewMode): string {
   const cards = payload.results.map((product) => productCard(product, lang)).join("\n");
-  const jsonHref = `/search?q=${encodeURIComponent(payload.query)}&amp;format=json&amp;lang=${lang}`;
   const hasResults = payload.results.length > 0;
 
+  // Pure search page: search box, view switcher, product cards. Nothing else.
   const body = hasResults
-    ? `<div class="grid view-${view}" id="productgrid">${cards}</div>
+    ? `<div class="resultsbar">${viewSwitch(lang, view)}</div>
+<div class="grid view-${view}" id="productgrid">${cards}</div>
 <script>${VIEW_SCRIPT}</script>`
     : `<div class="empty">
         <h2>${esc(t(lang, "empty_title"))}</h2>
-        <p>${esc(t(lang, "empty_text"))}</p>
+        <p>${esc(
+          (payload.meta.floor?.removed ?? 0) > 0
+            ? t(lang, "floor_empty")
+            : t(lang, "empty_text"),
+        )}</p>
         <div class="chips" style="justify-content:center">
           ${EXAMPLES.map(
             (example) =>
@@ -2336,21 +2626,6 @@ function resultsBody(payload: SearchPayload, lang: Lang, view: ViewMode): string
       </div>`;
 
   return `${searchForm(payload.query, false, lang)}
-${intentChips(payload, lang)}
-<div class="summary">
-  <span><b>${payload.meta.count}</b> ${esc(t(lang, "results_products"))}</span>
-  ${
-    payload.budget.applied
-      ? `<span>· ${payload.budget.removed} ${esc(t(lang, "results_filtered"))}</span>`
-      : ""
-  }
-  <span>· ${esc(t(lang, "results_margin"))} ${payload.pricing.markup_pct}%${
-    payload.pricing.flat_myr ? ` + ${money(payload.pricing.flat_myr)}` : ""
-  }</span>
-  <span>· ${payload.meta.timing_ms} ms</span>
-  <span>· <a href="${jsonHref}">JSON</a></span>
-  ${hasResults ? viewSwitch(lang, view) : ""}
-</div>
 ${body}`;
 }
 
@@ -2576,6 +2851,7 @@ app.post("/api/chat", async (c) => {
     const intent: Intent = {
       keyword: chat.keyword,
       max_price_myr: chat.max_price_myr,
+      ...(chat.filters.length ? { filters: chat.filters } : {}),
       engine: chat.engine,
       ...(chat.model ? { model: chat.model } : {}),
       ...(chat.note ? { note: chat.note } : {}),
@@ -2588,17 +2864,37 @@ app.post("/api/chat", async (c) => {
     );
   }
 
-  const products = search?.results ?? [];
+  const products = rankByFilters(search?.results ?? [], chat.filters);
   const cards = products.map((product) => productCard(product, lang)).join("\n");
+  const filterNote = chat.filters.length
+    ? ` · ${esc(chat.filters.join(", "))}`
+    : "";
   const productsHtml = products.length
     ? `<div class="chatmeta">${products.length} ${esc(
         t(lang, "results_products"),
-      )} · ${search?.meta.timing_ms ?? 0} ms</div><div class="grid">${cards}</div>`
+      )} · ${search?.meta.timing_ms ?? 0} ms${filterNote}</div><div class="grid">${cards}</div>`
     : "";
 
   let reply = chat.reply;
+
+  // Guarantee the spec is acknowledged conversationally, even if the model forgot.
+  if (
+    chat.filters.length > 0 &&
+    !chat.filters.some((filter) => reply.toLowerCase().includes(filter))
+  ) {
+    const ack =
+      lang === "en"
+        ? `Got it — ${chat.filters.join(", ")}. `
+        : `Faham, nak ${chat.filters.join(", ")}. `;
+    reply = ack + reply;
+  }
+
   if (search && products.length === 0) {
-    reply = `${reply} ${t(lang, "chat_empty")}`.trim();
+    const emptyNote =
+      (search.meta.floor?.removed ?? 0) > 0
+        ? t(lang, "floor_empty")
+        : t(lang, "chat_empty");
+    reply = `${reply} ${emptyNote}`.trim();
   }
 
   c.header("Cache-Control", "no-store");
@@ -2610,6 +2906,8 @@ app.post("/api/chat", async (c) => {
     intent: {
       keyword: chat.keyword,
       max_price_myr: chat.max_price_myr,
+      filters: chat.filters,
+      explicit: chat.explicit,
       ready: chat.ready,
       engine: chat.engine,
       ...(chat.model ? { model: chat.model } : {}),
@@ -2622,6 +2920,7 @@ app.post("/api/chat", async (c) => {
           timing_ms: search.meta.timing_ms,
           partial: search.meta.partial,
           sources: search.meta.sources,
+          floor: search.meta.floor,
         }
       : null,
     products,

@@ -32,7 +32,7 @@ Query params: `q` (2–200 aksara), `format=json\|html`, `lang=ms\|en`, `limit=1
 |---|---|
 | `/` dan `/chat` | Chat sahaja — bubble sejarah + kotak input |
 | `/search` | Halaman carian bersih (kotak besar ala Google) — tiada chat, tiada panel status |
-| `/search?q=` | Kotak carian + grid produk + pemilih paparan (`?view=large\|compact\|list`) |
+| `/search?q=` | Kotak carian + pemilih paparan + kad produk sahaja (tiada chip/ringkasan/API) |
 | `/status` | Panel status sistem (kunci API, margin, WhatsApp) |
 
 Nav: **Chat · Carian · API · Status**. `/health` kekal JSON untuk bot.
@@ -86,6 +86,52 @@ Respons:
 
 Tanpa `GEMINI_API_KEY` chat jatuh ke parser heuristik: kata kunci diambil dari turn
 terdahulu dan bajet dari turn terbaru, jadi aliran “produk → bajet” tetap berfungsi.
+
+### Bila carian dicetuskan
+
+`ready=true` hanya bila **kata kunci produk** ada DAN salah satu:
+
+- pengguna minta lihat produk secara eksplisit (“cari”, “tunjuk”, “show me”, “recommend”), ATAU
+- bajet (MYR) sudah diberi.
+
+Kata kunci sahaja tidak mencukupi — bot akan tanya bajet dulu (`ready=false`).
+Spesifikasi tidak mencetuskan carian; ia diakui secara natural:
+
+```
+User : laptop
+Bot  : Ada bajet maksimum?            (ready=false)
+User : ada nvidia ryzen 7
+Bot  : Faham, nak nvidia, ryzen 7. Berapakah bajet anda?   (ready=false)
+User : bawah RM5000
+Bot  : Mencari laptop … (filters: nvidia, ryzen 7)         (ready=true)
+```
+
+### Query vs filter
+
+- `keyword` = **kata nama produk asas** sahaja (“gaming laptop” → “laptop”).
+- `filters` = brand/GPU/CPU/RAM/saiz sebagai token (“nvidia”, “ryzen 7”) — disimpan
+  sebagai konteks dan dipakai untuk susun atur hasil (padanan naik ke atas),
+  **tidak** dihantar ke API CJ/AliExpress.
+- Perkataan chatter (“ada”, “nak”, budget, mata wang, nombor) dibuang sebelum carian.
+
+### Harga minimum kategori
+
+Untuk kategori bernilai tinggi, hasil bawah paras harga ditapis keluar supaya aksesori
+(stand, sleeve, mousepad) tidak muncul:
+
+| Kategori | Min jumlah (RM) |
+|---|---|
+| laptop / notebook / macbook | 300 |
+| monitor / display | 250 |
+| phone / smartphone | 250 |
+| tablet / ipad | 200 |
+| GPU / graphics card | 200 |
+| camera / lens | 150 |
+| projector | 100 |
+
+Bajet pengguna yang lebih rendah daripada paras ini mengatasi tapisan (contoh:
+“projector bawah RM80” tidak ditapis). Bila semua hasil ditapis, halaman tunjuk
+cadangan kata kunci lebih spesifik (cth: “laptop computer”).
 
 ## Ciri utama
 

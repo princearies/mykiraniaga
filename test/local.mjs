@@ -47,6 +47,8 @@ console.log("1) routing: chat vs search vs status");
   check("results grid", resultsBody.includes('class="grid view-large"'));
   check("view switcher", resultsBody.includes('class="viewswitch"') && (resultsBody.match(/data-view=/g) ?? []).length === 3);
   check("results have no chat", !resultsBody.includes('id="chatlog"') && !resultsBody.includes('id="chatinput"'));
+  check("results have no chips", !resultsBody.includes('class="chip"'));
+  check("results have no summary bar", !resultsBody.includes('class="summary"'));
   check("results have no api details", !resultsBody.includes('class="api"'));
 
   const status = await req("/status");
@@ -67,11 +69,11 @@ console.log("1) routing: chat vs search vs status");
 
 console.log("2) json api with RM budget");
 {
-  const res = await req("/api/search?q=" + encodeURIComponent("mini projector bawah RM80"));
+  const res = await req("/api/search?q=" + encodeURIComponent("earbuds bawah RM80"));
   const data = await res.json();
   check("status 200", res.status === 200);
   check("ok true", data.ok === true);
-  check("keyword", data.intent.keyword === "mini projector", JSON.stringify(data.intent));
+  check("keyword", data.intent.keyword === "earbuds", JSON.stringify(data.intent));
   check("budget parsed = 80", data.intent.max_price_myr === 80, data.intent.max_price_myr);
   check("budget applied", data.budget.applied === true);
   check("budget basis = total", data.budget.basis === "total", data.budget.basis);
@@ -327,6 +329,104 @@ console.log("12) view switcher modes");
   const chatData = await chat.json();
   check("chat inline cards", chatData.products_html.includes('class="card"'));
   check("chat meta line", chatData.products_html.includes('class="chatmeta"'));
+}
+
+console.log("13) chat gating: query vs filters");
+{
+  const base = [{ role: "user", content: "laptop gaming" }];
+
+  const plain = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: base }),
+  });
+  const plainData = await plain.json();
+  check("no search without budget/explicit", plainData.intent?.ready === false, JSON.stringify(plainData.intent));
+  check("asks for budget", /bajet|budget/i.test(plainData.reply), plainData.reply);
+  check("no products yet", (plainData.products ?? []).length === 0);
+
+  const spec = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [
+        { role: "user", content: "laptop gaming" },
+        { role: "assistant", content: "Baik, laptop gaming. Ada bajet maksimum?" },
+        { role: "user", content: "ada nvidia graphic card" },
+      ],
+    }),
+  });
+  const specData = await spec.json();
+  check("spec keeps ready=false", specData.intent?.ready === false, JSON.stringify(specData.intent));
+  check("spec captured as filter", (specData.intent?.filters ?? []).includes("nvidia"), JSON.stringify(specData.intent?.filters));
+  check("spec acknowledged", /nvidia/i.test(specData.reply), specData.reply);
+  check("still asks budget", /bajet|budget/i.test(specData.reply), specData.reply);
+  check("no premature search", (specData.products ?? []).length === 0);
+  check("keyword is base noun", specData.intent?.keyword === "laptop", String(specData.intent?.keyword));
+  check("keyword excludes spec", !String(specData.intent?.keyword).includes("nvidia"));
+
+  const withBudget = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [
+        { role: "user", content: "laptop gaming" },
+        { role: "assistant", content: "Ada bajet maksimum?" },
+        { role: "user", content: "ada nvidia graphic card" },
+        { role: "assistant", content: "Faham, nak nvidia. Ada bajet khusus?" },
+        { role: "user", content: "bawah RM5000" },
+      ],
+    }),
+  });
+  const budgetData = await withBudget.json();
+  check("budget unlocks search", budgetData.intent?.ready === true, JSON.stringify(budgetData.intent));
+  check("budget parsed", budgetData.intent?.max_price_myr === 5000, String(budgetData.intent?.max_price_myr));
+  check("filters retained", (budgetData.intent?.filters ?? []).includes("nvidia"));
+  check("keyword still base noun", budgetData.intent?.keyword === "laptop", String(budgetData.intent?.keyword));
+  check("products returned", (budgetData.products ?? []).length > 0);
+
+  const explicit = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "tunjuk earbuds murah" }] }),
+  });
+  const explicitData = await explicit.json();
+  check("explicit intent searches", explicitData.intent?.ready === true, JSON.stringify(explicitData.intent));
+  check("explicit keyword base noun", explicitData.intent?.keyword === "earbuds", String(explicitData.intent?.keyword));
+}
+
+console.log("14) category floor");
+{
+  const laptop = await req("/api/search?q=laptop");
+  const laptopData = await laptop.json();
+  check("laptop floor 300", laptopData.meta?.floor?.min_total_myr === 300, JSON.stringify(laptopData.meta?.floor));
+
+  const cheapProjector = await req("/api/search?q=" + encodeURIComponent("mini projector bawah RM80"));
+  const projData = await cheapProjector.json();
+  check(
+    "budget below floor wins",
+    projData.meta?.floor?.skipped === true,
+    JSON.stringify(projData.meta?.floor),
+  );
+
+  const chatLaptop = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [
+        { role: "user", content: "laptop" },
+        { role: "assistant", content: "Ada bajet?" },
+        { role: "user", content: "bawah RM5000" },
+      ],
+    }),
+  });
+  const chatData = await chatLaptop.json();
+  check("chat keyword base noun", chatData.intent?.keyword === "laptop", String(chatData.intent?.keyword));
+  check(
+    "chat floor rule applied",
+    chatData.search?.floor?.min_total_myr === 300,
+    JSON.stringify(chatData.search?.floor),
+  );
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
