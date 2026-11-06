@@ -603,5 +603,31 @@ console.log("20) Telegram checkout + support");
   check("checkout telegram button", checkout.includes('class="tg-btn"'));
 }
 
+console.log("21) trending hot items");
+{
+  const ms = await req("/search");
+  const msBody = await ms.text();
+  check("trending section", msBody.includes('class="trending"'));
+  check("trending title ms", msBody.includes("Pilihan Hangat"));
+  check("trending has cards", (msBody.match(/class="card"/g) ?? []).length >= 4);
+  check("trending dual buttons", msBody.includes("wa.me/60173735431") && msBody.includes("t.me/Mykirashopbot"));
+  check("trending json-ld", msBody.includes("application/ld+json") && msBody.includes('"@type":"ItemList"'));
+  check(
+    "trending offers currency",
+    msBody.includes('"priceCurrency":"MYR"'),
+  );
+
+  const en = await req("/search?lang=en");
+  check("trending title en", (await en.text()).includes("Trending Hot Items"));
+
+  const chat = await req("/");
+  check("chat pane trending", (await chat.text()).includes('class="trending"'));
+
+  const usd = await req("/search?currency=USD&lang=en");
+  const usdBody = await usd.text();
+  check("trending usd ld", usdBody.includes('"priceCurrency":"USD"'));
+  check("trending usd price", usdBody.includes("$"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

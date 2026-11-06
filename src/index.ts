@@ -68,6 +68,7 @@ export interface Env {
 }
 
 const SERVICE = "mykiraniaga";
+const SITE_URL = "https://mykiraniaga.mykira.workers.dev";
 const VERSION = "1.0.0";
 const DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest";
 // Note: gemini-2.5-flash-lite / gemini-2.0-flash-lite now return 404 for new
@@ -405,6 +406,143 @@ function whatsappUrlFor(
   return `https://wa.me/${whatsappNumber(env)}?text=${encodeURIComponent(
     lines.join("\n"),
   )}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Trending showcase (cached 15 min, SSR for SEO)                      */
+/* ------------------------------------------------------------------ */
+
+const TRENDING_KEYWORDS = [
+  "bluetooth speaker",
+  "smart watch",
+  "wireless earbuds",
+];
+const TRENDING_TTL_MS = 15 * 60 * 1000;
+let trendingCache: { at: number; items: PricedProduct[] } | null = null;
+
+async function getTrending(env: Env): Promise<PricedProduct[]> {
+  if (trendingCache && Date.now() - trendingCache.at < TRENDING_TTL_MS) {
+    return trendingCache.items;
+  }
+
+  // Edge cache keeps repeat visits under the 2s budget across isolates.
+  const edgeCache = typeof caches === "undefined" ? null : caches.default;
+  const cacheKey = new Request("https://cache.mykira.internal/trending-v3");
+  if (edgeCache) {
+    try {
+      const hit = await edgeCache.match(cacheKey);
+      if (hit) {
+        const items = (await hit.json()) as PricedProduct[];
+        if (Array.isArray(items) && items.length > 0) {
+          trendingCache = { at: Date.now(), items };
+          return items;
+        }
+      }
+    } catch {
+      // Cache API unavailable — continue with a live fetch.
+    }
+  }
+
+  const lists = await Promise.all(
+    TRENDING_KEYWORDS.map(async (keyword) => {
+      const intent: Intent = {
+        keyword,
+        max_price_myr: null,
+        engine: "heuristic",
+      };
+      try {
+        const payload = await runSearchWithIntent(env, keyword, intent, 6);
+        return payload.results;
+      } catch {
+        return [] as PricedProduct[];
+      }
+    }),
+  );
+
+  // Round-robin so the showcase mixes speakers, watches and earbuds.
+  const merged: PricedProduct[] = [];
+  const seen = new Set<string>();
+  const longest = lists.reduce((max, list) => Math.max(max, list.length), 0);
+  for (let index = 0; index < longest; index += 1) {
+    for (const list of lists) {
+      const item = list[index];
+      if (!item || seen.has(item.id)) continue;
+      seen.add(item.id);
+      merged.push(item);
+    }
+  }
+
+  const items = merged.slice(0, 8);
+  if (items.length > 0) {
+    trendingCache = { at: Date.now(), items };
+    if (edgeCache) {
+      try {
+        await edgeCache.put(
+          cacheKey,
+          new Response(JSON.stringify(items), {
+            headers: {
+              "Content-Type": "application/json",
+              "Cache-Control": "max-age=900",
+            },
+          }),
+        );
+      } catch {
+        // Best-effort only.
+      }
+    }
+  }
+  return items;
+}
+
+function trendingJsonLd(
+  items: PricedProduct[],
+  currency: CurrencyCode,
+  rate: number,
+  lang: Lang,
+): string {
+  const data = {
+    "@context": "https://schema.org",
+    "@type": "ItemList",
+    name: t(lang, "trending_title"),
+    itemListElement: items.map((product, index) => ({
+      "@type": "ListItem",
+      position: index + 1,
+      item: {
+        "@type": "Product",
+        name: product.title,
+        ...(product.image ? { image: product.image } : {}),
+        url: `${SITE_URL}${product.checkout_url}`,
+        offers: {
+          "@type": "Offer",
+          price: convertCurrency(product.total_myr, rate).toFixed(2),
+          priceCurrency: currency,
+          availability: "https://schema.org/InStock",
+        },
+      },
+    })),
+  };
+
+  return `<script type="application/ld+json">${JSON.stringify(data)}</script>`;
+}
+
+function trendingBody(
+  env: Env,
+  lang: Lang,
+  currency: CurrencyCode,
+  rate: number,
+  items: PricedProduct[],
+): string {
+  if (items.length === 0) return "";
+  const cards = items
+    .map((product) => productCard(product, lang, currency, rate, env))
+    .join("\n");
+
+  return `<section class="trending" aria-labelledby="trending-title">
+  <h2 id="trending-title">${esc(t(lang, "trending_title"))}</h2>
+  <p class="tlede">${esc(t(lang, "trending_lede"))}</p>
+  <div class="grid">${cards}</div>
+  ${trendingJsonLd(items, currency, rate, lang)}
+</section>`;
 }
 
 /** JSON projection with display_* fields for the selected currency. */
@@ -2161,6 +2299,10 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .footerlinks{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;width:100%;margin-bottom:8px}
 .footerlinks a{color:#8fa3c4}
 .footerlinks a:hover{color:#5eead4}
+.trending{margin:26px 0 0}
+.trending h2{font-size:19px;margin:0 0 4px;letter-spacing:-.2px}
+.trending .tlede{color:#8fa3c4;font-size:13px;margin:0 0 14px}
+.trending .grid{min-height:320px}
 .policy{max-width:760px;margin:0 auto}
 .pback{display:inline-block;font-size:13px;color:#7dd3fc;margin:4px 0 14px}
 .policy h1{font-size:clamp(24px,3.4vw,32px);margin:0 0 8px}
@@ -2374,6 +2516,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "Status",
     lang_name: "Bahasa Melayu",
+    trending_title: "Pilihan Hangat",
+    trending_lede:
+      "Produk rentas sempadan paling dicari minggu ini — harga termasuk penghantaran.",
     back_home: "Kembali",
     policy_updated: "Dikemas kini: November 2026",
     land_h1_a: "Cari produk dropship,",
@@ -2468,6 +2613,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "Status",
     lang_name: "English",
+    trending_title: "Trending Hot Items",
+    trending_lede:
+      "The most-wanted cross-border picks this week — landed prices include shipping.",
     back_home: "Back",
     policy_updated: "Last updated: November 2026",
     land_h1_a: "Find dropship products,",
@@ -2563,6 +2711,9 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "Status",
     lang_name: "Bahasa Indonesia",
+    trending_title: "Pilihan Populer",
+    trending_lede:
+      "Produk lintas negara paling dicari minggu ini — harga sudah termasuk pengiriman.",
     back_home: "Kembali",
     policy_updated: "Terakhir diperbarui: November 2026",
     land_lede:
@@ -2615,6 +2766,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "状态",
     lang_name: "中文",
+    trending_title: "热门推荐",
+    trending_lede: "本周最热门的跨境商品 — 价格已含运费。",
     back_home: "返回",
     policy_updated: "最后更新：2026 年 11 月",
     land_lede:
@@ -2763,6 +2916,7 @@ function chatBody(
   lang: Lang,
   currency: CurrencyCode = "MYR",
   rate = 1,
+  trending: PricedProduct[] = [],
 ): string {
   const suggestions = [
     t(lang, "chat_suggest_1"),
@@ -3064,7 +3218,11 @@ function chatBody(
     </div>
     <div class="metrics" id="products-metrics">${esc(metricsIdle)}</div>
     <div class="results-area" id="products-container" aria-live="polite">
-      <div class="results-placeholder">${esc(placeholder)}</div>
+      ${
+        trending.length > 0
+          ? trendingBody(env, lang, currency, rate, trending)
+          : `<div class="results-placeholder">${esc(placeholder)}</div>`
+      }
     </div>
   </section>
 
@@ -3263,7 +3421,14 @@ ${statusPanel(env, lang)}
 </div>`;
 }
 
-function searchHomeBody(lang: Lang, errorNote?: string): string {
+function searchHomeBody(
+  lang: Lang,
+  currency: CurrencyCode = "MYR",
+  rate = 1,
+  env: Env = {},
+  trending: PricedProduct[] = [],
+  errorNote?: string,
+): string {
   return `<div class="searchhome">
   <div class="searchlogo">MyKiraNiaga</div>
   <p class="searchtag">${esc(t(lang, "land_lede"))}</p>
@@ -3281,7 +3446,8 @@ function searchHomeBody(lang: Lang, errorNote?: string): string {
         )}&amp;lang=${lang}">${esc(example)}</a>`,
     ).join("")}
   </div>
-</div>`;
+</div>
+${trendingBody(env, lang, currency, rate, trending)}`;
 }
 function viewSwitch(lang: Lang, active: ViewMode): string {
   const modes: ViewMode[] = ["large", "compact", "list"];
@@ -4161,6 +4327,7 @@ app.get("/", async (c) => {
           await getRates(c.env),
           currencyFrom(c.req.query("currency")),
         ),
+        await getTrending(c.env),
       ),
       lang,
       currentUrl: c.req.url,
@@ -4194,6 +4361,7 @@ app.get("/chat", async (c) => {
           await getRates(c.env),
           currencyFrom(c.req.query("currency")),
         ),
+        await getTrending(c.env),
       ),
       lang,
       currentUrl: c.req.url,
@@ -4368,7 +4536,16 @@ app.get("/search", async (c) => {
       layout({
         title: t(lang, "meta_search_title"),
         description: t(lang, "meta_search_desc"),
-        body: searchHomeBody(lang, t(lang, "empty_q")),
+        body: searchHomeBody(
+          lang,
+          currencyFrom(c.req.query("currency")),
+          rateFor(
+            await getRates(c.env),
+            currencyFrom(c.req.query("currency")),
+          ),
+          c.env,
+          await getTrending(c.env),
+        ),
         lang,
         currentUrl: c.req.url,
       }),

@@ -68,6 +68,21 @@ muat semula dengan `?view=`.
 - Setiap halaman ada pautan **← Kembali** di atas dan bawah.
 - `?format=json` memulangkan `{slug, lang, title, intro, sections}`.
 
+## Trending showcase (SEO)
+
+Bila tiada `?q=`, homepage (`/`) dan halaman carian (`/search`) memaparkan
+**Pilihan Hangat / Trending Hot Items**:
+
+- Sumber: gabungan carian `bluetooth speaker`, `smart watch`, `wireless earbuds`
+  dari CJ + AliExpress (round-robin supaya bercampur), 8 kad.
+- Cache **15 minit** dalam memori isolate + **Cache API** (`trending-v3`) supaya
+  permintaan kedua ~155–175ms (permintaan pertama ~3.2s).
+- Kad sama seperti hasil carian: harga landed multi-mata wang, margin, butang
+  WhatsApp + Telegram.
+- SEO: `<section aria-labelledby>` + `<h2>` + `<h3>` tajuk produk + JSON-LD
+  `ItemList`/`Product`/`Offer` (price, priceCurrency, availability).
+- Grid ada `min-height` supaya tiada layout shift (CLS) pada mobil.
+
 ## Checkout dua saluran (WhatsApp + Telegram)
 
 Setiap kad produk (Search & Chat) ada dua butang sentuh:
