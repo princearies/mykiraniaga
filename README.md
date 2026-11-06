@@ -32,10 +32,25 @@ Query params: `q` (2–200 aksara), `format=json\|html`, `lang=ms\|en`, `limit=1
 |---|---|
 | `/` dan `/chat` | Chat sahaja — bubble sejarah + kotak input |
 | `/search` | Halaman carian bersih (kotak besar ala Google) — tiada chat, tiada panel status |
-| `/search?q=` | Kotak carian + grid produk sahaja |
+| `/search?q=` | Kotak carian + grid produk + pemilih paparan (`?view=large\|compact\|list`) |
 | `/status` | Panel status sistem (kunci API, margin, WhatsApp) |
 
 Nav: **Chat · Carian · API · Status**. `/health` kekal JSON untuk bot.
+
+## Paparan hasil (view switcher)
+
+Toolbar di kanan baris ringkasan ada tiga mod ala Windows Explorer:
+
+| Mod | `?view=` | Rupa |
+|---|---|---|
+| Grid besar | `large` (default) | kad 238px, gambar 4:3, margin + pos |
+| Grid kecil | `compact` | kad 166px, gambar 1:1, teks diringkaskan |
+| Senarai | `list` | satu kad per baris, gambar 134px di kiri |
+
+Pilihan disimpan dalam `localStorage` (`mkn_view`), dicermin ke URL melalui
+`history.replaceState`, dan boleh dipaksa melalui query supaya pautan boleh dikongsi
+(contoh: `/search?q=laptop&view=list`). Tanpa JavaScript, butang masih berfungsi melalui
+muat semula dengan `?view=`.
 
 ## Chat percakapan
 

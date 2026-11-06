@@ -44,7 +44,8 @@ console.log("1) routing: chat vs search vs status");
 
   const results = await req("/search?q=projector");
   const resultsBody = await results.text();
-  check("results grid", resultsBody.includes('class="grid"'));
+  check("results grid", resultsBody.includes('class="grid view-large"'));
+  check("view switcher", resultsBody.includes('class="viewswitch"') && (resultsBody.match(/data-view=/g) ?? []).length === 3);
   check("results have no chat", !resultsBody.includes('id="chatlog"') && !resultsBody.includes('id="chatinput"'));
   check("results have no api details", !resultsBody.includes('class="api"'));
 
@@ -302,6 +303,30 @@ console.log("11) conversational chat");
     body: "{not json",
   });
   check("bad json 400", badJson.status === 400, badJson.status);
+}
+
+console.log("12) view switcher modes");
+{
+  const large = await req("/search?q=projector");
+  check("default view-large", (await large.text()).includes('class="grid view-large"'));
+
+  const compact = await req("/search?q=projector&view=compact");
+  check("view=compact", (await compact.text()).includes('class="grid view-compact"'));
+
+  const list = await req("/search?q=projector&view=list");
+  check("view=list", (await list.text()).includes('class="grid view-list"'));
+
+  const bogus = await req("/search?q=projector&view=huge");
+  check("invalid view falls back", (await bogus.text()).includes('class="grid view-large"'));
+
+  const chat = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "nak cari projector" }] }),
+  });
+  const chatData = await chat.json();
+  check("chat inline cards", chatData.products_html.includes('class="card"'));
+  check("chat meta line", chatData.products_html.includes('class="chatmeta"'));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

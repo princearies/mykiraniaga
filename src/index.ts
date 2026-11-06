@@ -1659,6 +1659,26 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .statuspage{max-width:720px;margin:8px auto 0}
 .statuspage .status-card{margin-top:0}
 .statuslinks{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;font-size:13px;color:#7c93b8}
+.viewswitch{display:inline-flex;gap:4px;background:#0f1b2e;border:1px solid #1e2f4a;border-radius:10px;padding:3px;margin-left:auto}
+.viewbtn{width:32px;height:26px;border:0;border-radius:7px;background:transparent;color:#8fa3c4;cursor:pointer;font-size:14px;line-height:1;display:grid;place-items:center;font-family:inherit}
+.viewbtn:hover{background:#132441;color:#e6eefc}
+.viewbtn.active{background:#123049;color:#22d3ee}
+.grid.view-compact{grid-template-columns:repeat(auto-fill,minmax(166px,1fr));gap:11px}
+.grid.view-compact .thumb{aspect-ratio:1/1}
+.grid.view-compact .body{padding:10px 11px;gap:5px}
+.grid.view-compact .title{font-size:13px;min-height:35px}
+.grid.view-compact .price{font-size:16px}
+.grid.view-compact .ship,.grid.view-compact .margin,.grid.view-compact .src-link{display:none}
+.grid.view-compact .foot .total{display:none}
+.grid.view-compact .foot{justify-content:flex-end}
+.grid.view-list{grid-template-columns:1fr;gap:10px}
+.grid.view-list .card{flex-direction:row;align-items:stretch}
+.grid.view-list .thumb{width:134px;min-width:134px;aspect-ratio:1/1;border-right:1px solid #16233a}
+.grid.view-list .body{padding:12px 15px}
+.grid.view-list .title{min-height:0;font-size:14.5px;-webkit-line-clamp:2}
+.grid.view-list .price{font-size:17px}
+.grid.view-list .foot{margin-top:4px}
+.chatmeta{font-size:12px;color:#8fa3c4;margin:2px 2px 8px}
 .chatwrap{margin-top:8px}
 .chatlog{display:flex;flex-direction:column;gap:12px;background:#0b1524;border:1px solid #1a2a42;border-radius:16px;padding:18px;min-height:280px;max-height:60vh;overflow-y:auto;scroll-behavior:smooth}
 .msg{display:flex;gap:10px}
@@ -1689,6 +1709,13 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 /* ------------------------------------------------------------------ */
 
 type Lang = "ms" | "en";
+
+/** Windows-explorer style product view. */
+type ViewMode = "large" | "compact" | "list";
+
+function viewFrom(raw: string | undefined): ViewMode {
+  return raw === "compact" || raw === "list" || raw === "large" ? raw : "large";
+}
 
 const STRINGS: Record<Lang, Record<string, string>> = {
   ms: {
@@ -1775,6 +1802,10 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     chat_hint: "Enter untuk hantar · Shift+Enter baris baru",
     status_lede:
       "Semakan konfigurasi enjin: kunci API, margin dan nombor WhatsApp.",
+    view_label: "Pilihan paparan",
+    view_large: "Grid besar",
+    view_compact: "Grid kecil",
+    view_list: "Senarai",
   },
   en: {
     tagline: "on-demand dropshipping search",
@@ -1859,6 +1890,10 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     chat_empty: "No products inside that budget — try raising it.",
     chat_hint: "Enter to send · Shift+Enter for a new line",
     status_lede: "Engine configuration check: API keys, margin and WhatsApp number.",
+    view_label: "View options",
+    view_large: "Large grid",
+    view_compact: "Small grid",
+    view_list: "List",
   },
 };
 
@@ -2223,12 +2258,70 @@ function searchHomeBody(lang: Lang, errorNote?: string): string {
   </div>
 </div>`;
 }
-function resultsBody(payload: SearchPayload, lang: Lang): string {
+function viewSwitch(lang: Lang, active: ViewMode): string {
+  const modes: ViewMode[] = ["large", "compact", "list"];
+  const glyph: Record<ViewMode, string> = {
+    large: "▦",
+    compact: "▥",
+    list: "☰",
+  };
+
+  return `<div class="viewswitch" role="group" aria-label="${esc(
+    t(lang, "view_label"),
+  )}">${modes
+    .map((mode) => {
+      const label = esc(t(lang, `view_${mode}`));
+      return `<button type="button" class="viewbtn${
+        mode === active ? " active" : ""
+      }" data-view="${mode}" title="${label}" aria-label="${label}" aria-pressed="${
+        mode === active
+      }">${glyph[mode]}</button>`;
+    })
+    .join("")}</div>`;
+}
+
+const VIEW_SCRIPT = `
+(function () {
+  var grid = document.getElementById("productgrid");
+  if (!grid) return;
+  var KEY = "mkn_view";
+  var buttons = document.querySelectorAll(".viewbtn");
+  var query = new URLSearchParams(location.search);
+  var stored = null;
+  try { stored = localStorage.getItem(KEY); } catch (e) {}
+
+  function apply(view, persist) {
+    grid.className = "grid view-" + view;
+    for (var i = 0; i < buttons.length; i++) {
+      var on = buttons[i].getAttribute("data-view") === view;
+      buttons[i].classList.toggle("active", on);
+      buttons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    if (persist) {
+      try { localStorage.setItem(KEY, view); } catch (e) {}
+      var url = new URL(location.href);
+      url.searchParams.set("view", view);
+      history.replaceState(null, "", url.toString());
+    }
+  }
+
+  if (!query.get("view") && stored) apply(stored, false);
+  for (var j = 0; j < buttons.length; j++) {
+    buttons[j].addEventListener("click", function () {
+      apply(this.getAttribute("data-view"), true);
+    });
+  }
+})();
+`;
+
+function resultsBody(payload: SearchPayload, lang: Lang, view: ViewMode): string {
   const cards = payload.results.map((product) => productCard(product, lang)).join("\n");
   const jsonHref = `/search?q=${encodeURIComponent(payload.query)}&amp;format=json&amp;lang=${lang}`;
+  const hasResults = payload.results.length > 0;
 
-  const body = payload.results.length
-    ? `<div class="grid">${cards}</div>`
+  const body = hasResults
+    ? `<div class="grid view-${view}" id="productgrid">${cards}</div>
+<script>${VIEW_SCRIPT}</script>`
     : `<div class="empty">
         <h2>${esc(t(lang, "empty_title"))}</h2>
         <p>${esc(t(lang, "empty_text"))}</p>
@@ -2256,6 +2349,7 @@ ${intentChips(payload, lang)}
   }</span>
   <span>· ${payload.meta.timing_ms} ms</span>
   <span>· <a href="${jsonHref}">JSON</a></span>
+  ${hasResults ? viewSwitch(lang, view) : ""}
 </div>
 ${body}`;
 }
@@ -2496,7 +2590,11 @@ app.post("/api/chat", async (c) => {
 
   const products = search?.results ?? [];
   const cards = products.map((product) => productCard(product, lang)).join("\n");
-  const productsHtml = products.length ? `<div class="grid">${cards}</div>` : "";
+  const productsHtml = products.length
+    ? `<div class="chatmeta">${products.length} ${esc(
+        t(lang, "results_products"),
+      )} · ${search?.meta.timing_ms ?? 0} ms</div><div class="grid">${cards}</div>`
+    : "";
 
   let reply = chat.reply;
   if (search && products.length === 0) {
@@ -2591,7 +2689,7 @@ app.get("/search", async (c) => {
     layout({
       title: `${payload.intent.keyword} — MyKiraNiaga`,
       description,
-      body: resultsBody(payload, lang),
+      body: resultsBody(payload, lang, viewFrom(c.req.query("view"))),
       lang,
       currentUrl: c.req.url,
     }),
