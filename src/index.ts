@@ -1999,14 +1999,42 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .mobiletabs button{flex:1;background:#0f1b2e;border:1px solid #1e2f4a;border-radius:10px;color:#9db2d3;padding:9px;font:inherit;font-size:13px;cursor:pointer}
 .mobiletabs button.active{background:#123049;color:#22d3ee;border-color:#2c6d8a}
 #resultcount{color:#22d3ee;font-weight:700}
-@media (max-width:900px){
-  .split{grid-template-columns:1fr}
-  .mobiletabs{display:flex}
+.productspill{display:none}
+[hidden]{display:none!important}
+@media (max-width:768px){
+  .split{grid-template-columns:1fr;gap:12px}
+  .mobiletabs{display:flex;position:sticky;top:0;z-index:15;background:#070d18;padding:6px 0;margin:10px 0 0}
+  .mobiletabs button{min-height:44px;font-size:14px;display:flex;align-items:center;justify-content:center;gap:6px}
   .pane{display:none}
   .pane.active{display:flex;flex-direction:column}
   .chat-pane{position:static;height:auto;max-height:none;min-height:0}
-  .chat-pane .chatlog{max-height:54vh}
+  .chat-pane .chatlog{max-height:52vh;min-height:220px}
   .results-pane{min-height:0}
+  .grid.view-large{grid-template-columns:1fr}
+  .grid.view-compact{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+  .grid.view-list{grid-template-columns:1fr}
+  .grid.view-compact .thumb{aspect-ratio:1/1}
+  .grid.view-compact .ship,.grid.view-compact .margin,.grid.view-compact .src-link{display:none}
+  .viewswitch{padding:4px;gap:6px}
+  .viewbtn{width:44px;height:44px;font-size:16px}
+  .chatcompose{padding:8px}
+  .chatcompose textarea{min-height:44px;font-size:16px}
+  .chatcompose button{min-height:44px;min-width:76px;font-size:15px}
+  .quickchips button{min-height:44px;padding:10px 16px;font-size:13.5px}
+  .cta-buy{min-height:44px;display:inline-flex;align-items:center;justify-content:center;padding:10px 14px}
+  .chattools{font-size:12.5px}
+  .chattools button{min-height:44px;padding:6px 4px}
+  .productspill{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:48px;margin:10px 0 0;border:0;border-radius:12px;background:linear-gradient(135deg,#22d3ee,#7dd3fc);color:#04121c;font:inherit;font-weight:800;font-size:14px;cursor:pointer;box-shadow:0 8px 24px rgba(34,211,238,.18)}
+  .productspill:active{transform:scale(.99)}
+  .wrap{padding:14px 12px 56px}
+  .top{flex-wrap:wrap;gap:8px;padding-bottom:14px}
+  .top nav{width:100%;justify-content:space-between;gap:8px;font-size:12.5px;flex-wrap:wrap}
+  .top nav a{padding:6px 0}
+  .brand small{font-size:11px}
+  h1{font-size:26px;margin:10px 0 8px}
+  .lede{font-size:13.5px;margin-bottom:14px}
+  .langmenu summary{padding:8px 10px}
+  .mobiletabs button{flex:1 1 0;min-width:0;padding:10px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-transform:capitalize}
 }
 .chatwrap{margin-top:8px}
 .chatlog{display:flex;flex-direction:column;gap:12px;background:#0b1524;border:1px solid #1a2a42;border-radius:16px;padding:18px;min-height:280px;max-height:60vh;overflow-y:auto;scroll-behavior:smooth}
@@ -2130,6 +2158,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     chat_typing: "Sedang mencari…",
     chat_empty: "Tak jumpa produk dalam bajet itu — cuba naikkan bajet.",
     chat_hint: "Enter untuk hantar · Shift+Enter baris baru",
+    chat_view_products: "Lihat {n} produk ditemui →",
     status_lede:
       "Semakan konfigurasi enjin: kunci API, margin dan nombor WhatsApp.",
     view_label: "Pilihan paparan",
@@ -2221,6 +2250,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     chat_typing: "Searching…",
     chat_empty: "No products inside that budget — try raising it.",
     chat_hint: "Enter to send · Shift+Enter for a new line",
+    chat_view_products: "View {n} products found →",
     status_lede: "Engine configuration check: API keys, margin and WhatsApp number.",
     view_label: "View options",
     view_large: "Large grid",
@@ -2320,6 +2350,7 @@ function chatBody(env: Env, lang: Lang): string {
   var countBadge = document.getElementById("resultcount");
   var chatPane = document.getElementById("chatpane");
   var resultsPane = document.getElementById("resultspane");
+  var pill = document.getElementById("productspill");
   var tabs = document.querySelectorAll("[data-tab]");
   var viewButtons = document.querySelectorAll("[data-cview]");
 
@@ -2331,12 +2362,21 @@ function chatBody(env: Env, lang: Lang): string {
   var PLACEHOLDER = ${JSON.stringify(placeholder)};
   var METRICS_IDLE = ${JSON.stringify(metricsIdle)};
   var LABEL_PRODUCTS = ${JSON.stringify(t(lang, "results_products"))};
+  var PILL_TEXT = ${JSON.stringify(t(lang, "chat_view_products"))};
+
+  function isMobile() { return window.matchMedia("(max-width: 768px)").matches; }
 
   var history = [];
   try { history = JSON.parse(sessionStorage.getItem(KEY) || "[]") || []; } catch (e) { history = []; }
 
   var view = "large";
-  try { view = localStorage.getItem(VKEY) || "large"; } catch (e) {}
+  var storedView = null;
+  try { storedView = localStorage.getItem(VKEY); } catch (e) {}
+  if (window.matchMedia("(max-width: 768px)").matches && !storedView) {
+    view = "compact"; // phones default to a 2-column grid
+  } else if (storedView) {
+    view = storedView;
+  }
   if (["large", "compact", "list"].indexOf(view) < 0) view = "large";
 
   function save() { try { sessionStorage.setItem(KEY, JSON.stringify(history.slice(-40))); } catch (e) {} }
@@ -2409,6 +2449,14 @@ function chatBody(env: Env, lang: Lang): string {
     }
     if (chatPane) chatPane.classList.toggle("active", tab === "chat");
     if (resultsPane) resultsPane.classList.toggle("active", tab === "results");
+    if (pill && tab === "results") pill.hidden = true;
+  }
+
+  function showPill(count) {
+    if (!pill) return;
+    if (!isMobile() || count <= 0) { pill.hidden = true; return; }
+    pill.textContent = PILL_TEXT.replace("{n}", String(count));
+    pill.hidden = false;
   }
 
   function renderProducts(data) {
@@ -2429,7 +2477,8 @@ function chatBody(env: Env, lang: Lang): string {
     metrics.textContent = bits.join(" · ");
     if (countBadge) countBadge.textContent = m.count ? "(" + m.count + ")" : "";
 
-    if (window.matchMedia("(max-width: 900px)").matches) activate("results");
+    // Stay on Chat; offer a pill instead of yanking the view.
+    showPill(m.count);
   }
 
   async function send(text) {
@@ -2488,6 +2537,13 @@ function chatBody(env: Env, lang: Lang): string {
     });
   }
 
+  if (pill) {
+    pill.addEventListener("click", function () {
+      activate("results");
+      if (resultsPane) resultsPane.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
   var clear = document.getElementById("chatclear");
   if (clear) {
     clear.addEventListener("click", function () {
@@ -2497,6 +2553,7 @@ function chatBody(env: Env, lang: Lang): string {
       results.innerHTML = '<div class="results-placeholder">' + PLACEHOLDER + "</div>";
       metrics.textContent = METRICS_IDLE;
       if (countBadge) countBadge.textContent = "";
+      if (pill) pill.hidden = true;
       input.focus();
     });
   }
@@ -2509,6 +2566,7 @@ function chatBody(env: Env, lang: Lang): string {
   stopTyping();
   applyView(view, false);
   render();
+
 })();
 `;
 
@@ -2516,8 +2574,8 @@ function chatBody(env: Env, lang: Lang): string {
 <p class="lede">${esc(t(lang, "chat_lede"))}</p>
 
 <div class="mobiletabs" role="tablist">
-  <button type="button" data-tab="chat" class="active">${esc(t(lang, "nav_chat"))}</button>
-  <button type="button" data-tab="results">${esc(
+  <button type="button" data-tab="chat" class="active">💬 ${esc(t(lang, "nav_chat"))}</button>
+  <button type="button" data-tab="results">🛍️ ${esc(
     t(lang, "results_products"),
   )} <span id="resultcount"></span></button>
 </div>
@@ -2551,6 +2609,9 @@ function chatBody(env: Env, lang: Lang): string {
     <div id="typing" class="typing" hidden style="display:none"><span class="dot"></span><span class="dot"></span><span class="dot"></span> ${esc(
       t(lang, "chat_typing"),
     )}</div>
+    <button type="button" id="productspill" class="productspill" hidden>${esc(
+      t(lang, "chat_view_products").replace("{n}", "0"),
+    )}</button>
     <form id="chatform" class="chatcompose" autocomplete="off">
       <textarea id="chatinput" rows="2" placeholder="${esc(
         t(lang, "chat_placeholder"),

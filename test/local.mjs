@@ -470,5 +470,20 @@ console.log("16) supplier query normalisation");
   );
 }
 
+console.log("17) mobile split-screen");
+{
+  const page = await req("/");
+  const body = await page.text();
+  check("emoji chat tab", body.includes("💬") && body.includes('data-tab="chat"'));
+  check("emoji products tab", body.includes("🛍️") && body.includes('data-tab="results"'));
+  check("products pill", body.includes('id="productspill"'));
+  check("mobile breakpoint 768", body.includes("@media (max-width:768px)"));
+  check("mobile grid 1col", body.includes(".grid.view-large{grid-template-columns:1fr}"));
+  check("mobile grid 2col", body.includes(".grid.view-compact{grid-template-columns:repeat(2,minmax(0,1fr))"));
+  check("44px touch targets", body.includes("min-height:44px"));
+  check("pill text", body.includes("Lihat {n} produk") || body.includes("View {n} products"));
+  check("no auto-switch on mobile", body.includes("showPill(m.count)") && body.includes("isMobile()"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

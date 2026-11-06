@@ -61,9 +61,16 @@ muat semula dengan `?view=`.
 - **Kanan (~32%)** — panel chat: bubble sejarah, input, hantar, chip cadangan, kosongkan chat.
   Panel ini `position:sticky` dan scroll dalamannya sendiri.
 
-Pada skrin ≤900px, panel jadi satu kolum dan tab **Chat | Hasil** muncul (tab Hasil dapat
-badge bilangan produk). Bila hasil tiba, tab Hasil diaktifkan automatik pada telefon.
-Spinner “Sedang mencari…” dipadam serta-merta selepas respons tiba, sebelum kad dirender.
+### Mobil (≤768px)
+
+- Satu kolum; tab **💬 Chat | 🛍️ Produk (n)** di atas (sticky).
+- Default tab **Chat**; hasil **tidak** menukar tab secara paksa.
+- Bila produk ditemui: badge tab dikemas kini dan pill terapung
+  **“Lihat 6 produk ditemui →”** muncul dalam chat; tekan untuk ke tab Produk.
+- Grid mobil: `large` = 1 kolum, `compact` = 2 kolum (default telefon), `list` = 1 kolum.
+- Sasaran sentuh ≥44px: butang tab, view toggle (44×44), chip cadangan, Hantar, dan
+  butang **Order →** pada kad.
+- Tiada overflow melintang (diuji `scrollWidth == innerWidth`).
 
 `GET /` sekarang buka chat. Sejarah disimpan dalam `sessionStorage` pelayar dan dihantar
 semula setiap turn — worker kekal stateless.
