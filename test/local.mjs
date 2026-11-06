@@ -436,11 +436,14 @@ console.log("15) split-screen chat layout");
   check("split container", body.includes('class="split"'));
   check("results pane", body.includes('id="resultspane"'));
   check("chat pane", body.includes('id="chatpane"'));
-  check("results area", body.includes('id="chatresults"'));
-  check("metrics line", body.includes('id="chatmetrics"'));
+  check("results area", body.includes('id="products-container"'));
+  check("metrics line", body.includes('id="products-metrics"'));
+  check("typing hidden by default", /id="typing"[^>]*hidden/.test(body));
   check("view toggles", (body.match(/data-cview=/g) ?? []).length === 3);
   check("mobile tabs", body.includes('class="mobiletabs"') && body.includes('data-tab="results"'));
   check("placeholder", body.includes("results-placeholder"));
+  check("js targets products-container", body.includes('getElementById("products-container")'));
+  check("js stops spinner", body.includes("stopTyping") && body.includes('typing.style.display = "none"'));
   check("no status on chat", !body.includes("Status sistem"));
 
   const chat = await req("/api/chat", {

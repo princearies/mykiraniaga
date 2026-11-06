@@ -1985,9 +1985,15 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .metrics{font-size:12px;color:#7c93b8;margin:0 0 10px;min-height:16px}
 .results-placeholder{border:1px dashed #24374f;border-radius:12px;padding:44px 16px;text-align:center;color:#7c93b8;font-size:13px}
 .results-pane{min-height:430px}
-.chat-pane{position:sticky;top:12px;display:flex;flex-direction:column;height:calc(100vh - 150px);max-height:780px;min-height:430px}
-.chat-pane .chatlog{flex:1;min-height:160px;max-height:none}
-.chat-pane .chatcompose{margin-top:10px}
+.chat-pane{position:sticky;top:12px;display:flex;flex-direction:column;height:clamp(440px,calc(100vh - 270px),760px);min-height:0;overflow:hidden}
+.chat-pane .chatlog{flex:1 1 auto;min-height:0;overflow-y:auto}
+.chat-pane .typing{flex:0 0 auto}
+.chat-pane .chatcompose{flex:0 0 auto;margin-top:8px;align-items:flex-end}
+.chat-pane .chatcompose button{height:40px;align-self:flex-end}
+.chat-pane .chattools,.chat-pane .quickchips{flex:0 0 auto}
+.chatcompose textarea{min-height:44px;max-height:110px;overflow-y:auto;line-height:1.35;padding:9px 12px}
+.chat-pane .chattools{margin-top:8px}
+.chat-pane .quickchips{margin-top:8px}
 .chat-pane .quickchips button{font-size:12px}
 .mobiletabs{display:none;gap:6px;margin:12px 0 0}
 .mobiletabs button{flex:1;background:#0f1b2e;border:1px solid #1e2f4a;border-radius:10px;color:#9db2d3;padding:9px;font:inherit;font-size:13px;cursor:pointer}
@@ -2017,6 +2023,7 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .chatcompose button{border:0;border-radius:10px;padding:0 18px;font-weight:700;font-size:14.5px;background:linear-gradient(135deg,#22d3ee,#7dd3fc);color:#04121c;cursor:pointer;font-family:inherit}
 .chatcompose button:disabled{opacity:.55;cursor:progress}
 .typing{display:flex;gap:8px;align-items:center;color:#8fa3c4;font-size:12.5px;margin-top:10px}
+.typing[hidden]{display:none!important}
 .dot{width:6px;height:6px;border-radius:50%;background:#22d3ee;opacity:.35;animation:blink 1.1s infinite}
 .dot:nth-child(2){animation-delay:.15s}.dot:nth-child(3){animation-delay:.3s}
 @keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}
@@ -2308,8 +2315,8 @@ function chatBody(env: Env, lang: Lang): string {
   var input = document.getElementById("chatinput");
   var typing = document.getElementById("typing");
   var sendBtn = form.querySelector("button[type=submit]");
-  var results = document.getElementById("chatresults");
-  var metrics = document.getElementById("chatmetrics");
+  var results = document.getElementById("products-container");
+  var metrics = document.getElementById("products-metrics");
   var countBadge = document.getElementById("resultcount");
   var chatPane = document.getElementById("chatpane");
   var resultsPane = document.getElementById("resultspane");
@@ -2333,6 +2340,29 @@ function chatBody(env: Env, lang: Lang): string {
   if (["large", "compact", "list"].indexOf(view) < 0) view = "large";
 
   function save() { try { sessionStorage.setItem(KEY, JSON.stringify(history.slice(-40))); } catch (e) {} }
+
+  function stopTyping() { typing.hidden = true; typing.style.display = "none"; }
+  function startTyping() { typing.hidden = false; typing.style.display = "flex"; }
+  function escHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function money(value) { return "RM " + Number(value || 0).toFixed(2); }
+  function fallbackCards(products) {
+    return products.map(function (p) {
+      var img = p.image
+        ? '<img src="' + escHtml(p.image) + '" alt="" loading="lazy" referrerpolicy="no-referrer">'
+        : '<span class="tile">' + (p.source === "cj" ? "CJ" : "AE") + "</span>";
+      return '<article class="card"><div class="thumb">' + img + '</div><div class="body">' +
+        '<span class="src ' + escHtml(p.source) + '">' + escHtml(p.source_label || p.source) + "</span>" +
+        '<h3 class="title">' + escHtml(p.title) + "</h3>" +
+        '<div class="price">' + money(p.price_myr) + "</div>" +
+        '<div class="foot"><span class="total">' + money(p.total_myr) + "</span>" +
+        '<a class="cta cta-buy" href="' + escHtml(p.checkout_url || "#") + '">Order →</a></div>' +
+        "</div></article>";
+    }).join("");
+  }
   function scroll() { log.scrollTop = log.scrollHeight; }
 
   function bubble(role, text) {
@@ -2382,8 +2412,13 @@ function chatBody(env: Env, lang: Lang): string {
   }
 
   function renderProducts(data) {
-    if (!data.products_html) return;
-    results.innerHTML = data.products_html;
+    var html = data.products_html;
+    if (!html && data.products && data.products.length) {
+      html = '<div class="grid">' + fallbackCards(data.products) + "</div>";
+    }
+    if (!html) return;
+
+    results.innerHTML = html;
     applyView(view, false);
 
     var m = data.metrics || { count: 0, timing_ms: 0, filters: [] };
@@ -2403,7 +2438,8 @@ function chatBody(env: Env, lang: Lang): string {
 
     push("user", text);
     input.value = "";
-    typing.hidden = false;
+    input.style.height = "";
+    startTyping();
     sendBtn.disabled = true;
     input.disabled = true;
 
@@ -2414,16 +2450,16 @@ function chatBody(env: Env, lang: Lang): string {
         body: JSON.stringify({ messages: history, lang: LANG }),
       });
       var data = await res.json();
-      typing.hidden = true; // stop the spinner the moment the response lands
+      stopTyping(); // spinner gone the moment the response lands
       if (!data.ok) throw new Error(data.message || data.error || "error");
       push("assistant", data.reply);
       renderProducts(data);
     } catch (err) {
-      typing.hidden = true;
+      stopTyping();
       log.appendChild(bubble("assistant", "⚠ " + ERROR));
       scroll();
     } finally {
-      typing.hidden = true;
+      stopTyping();
       sendBtn.disabled = false;
       input.disabled = false;
       input.focus();
@@ -2465,6 +2501,12 @@ function chatBody(env: Env, lang: Lang): string {
     });
   }
 
+  input.addEventListener("input", function () {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 120) + "px";
+  });
+
+  stopTyping();
   applyView(view, false);
   render();
 })();
@@ -2498,19 +2540,19 @@ function chatBody(env: Env, lang: Lang): string {
         )}" aria-label="${esc(t(lang, "view_list"))}">☰</button>
       </div>
     </div>
-    <div class="metrics" id="chatmetrics">${esc(metricsIdle)}</div>
-    <div class="results-area" id="chatresults" aria-live="polite">
+    <div class="metrics" id="products-metrics">${esc(metricsIdle)}</div>
+    <div class="results-area" id="products-container" aria-live="polite">
       <div class="results-placeholder">${esc(placeholder)}</div>
     </div>
   </section>
 
   <aside class="pane chat-pane active" id="chatpane">
     <div id="chatlog" class="chatlog" aria-live="polite"></div>
-    <div id="typing" class="typing" hidden><span class="dot"></span><span class="dot"></span><span class="dot"></span> ${esc(
+    <div id="typing" class="typing" hidden style="display:none"><span class="dot"></span><span class="dot"></span><span class="dot"></span> ${esc(
       t(lang, "chat_typing"),
     )}</div>
     <form id="chatform" class="chatcompose" autocomplete="off">
-      <textarea id="chatinput" rows="1" placeholder="${esc(
+      <textarea id="chatinput" rows="2" placeholder="${esc(
         t(lang, "chat_placeholder"),
       )}" aria-label="${esc(t(lang, "chat_placeholder"))}"></textarea>
       <button type="submit">${esc(t(lang, "chat_send"))}</button>
