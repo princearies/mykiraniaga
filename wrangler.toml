@@ -1,0 +1,21 @@
+name = "mykiraniaga"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+workers_dev = true
+
+[observability]
+enabled = true
+
+[vars]
+GEMINI_MODEL = "gemini-flash-lite-latest"
+CJ_BASE_URL = "https://developers.cjdropshipping.com/api2.0/v1"
+ALIEXPRESS_BASE_URL = "https://api-sg.aliexpress.com/sync"
+DEFAULT_USD_MYR = "4.72"
+ENVIRONMENT = "production"
+
+# Secrets — set once, never in this file:
+#   wrangler secret put GEMINI_API_KEY
+#   wrangler secret put CJ_ACCESS_TOKEN            (optional, enables live CJ)
+#   wrangler secret put ALIEXPRESS_APP_KEY         (optional, enables live AliExpress)
+#   wrangler secret put ALIEXPRESS_APP_SECRET      (optional)
+#   wrangler secret put ALIEXPRESS_TRACKING_ID     (optional)

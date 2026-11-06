@@ -1,0 +1,32 @@
+{
+  "name": "mykiraniaga",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MyKiraNiaga — on-demand dropshipping search engine (Hono + Cloudflare Workers + Gemini Flash-Lite)",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "cloudflare-workers",
+    "hono",
+    "dropshipping",
+    "gemini",
+    "search"
+  ],
+  "license": "MIT"
+}
