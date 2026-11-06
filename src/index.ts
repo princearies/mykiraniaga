@@ -36,9 +36,11 @@ export interface Env {
   GEMINI_API_KEY?: string;
   /** Override the default model alias. */
   GEMINI_MODEL?: string;
-  /** CJ Dropshipping access token (OAuth, 180 days). Optional. */
+  /** CJ Dropshipping MCP credentials — stateless token URL (preferred, live). */
+  CJ_MCP_USER?: string;
+  CJ_MCP_ACCESS_TOKEN?: string;
+  /** Legacy CJ Open API token (unused by the MCP path, kept for compatibility). */
   CJ_ACCESS_TOKEN?: string;
-  CJ_BASE_URL?: string;
   /** AliExpress Open Platform (affiliate) credentials. Optional. */
   ALIEXPRESS_APP_KEY?: string;
   ALIEXPRESS_APP_SECRET?: string;
@@ -52,7 +54,8 @@ export interface Env {
 const SERVICE = "mykiraniaga";
 const VERSION = "1.0.0";
 const DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest";
-const GEMINI_FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-2.0-flash-lite"];
+// Note: gemini-2.5-flash-lite / gemini-2.0-flash-lite now return 404 for new
+// keys (verified Nov 2026), so there is no version fallback — only a retry.
 const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
 const DEFAULT_FX = 4.72;
 const MAX_RESULTS = 40;
@@ -191,6 +194,10 @@ function timeoutSignal(ms: number): AbortSignal {
   const controller = new AbortController();
   setTimeout(() => controller.abort(), ms);
   return controller.signal;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function money(n: number): string {
@@ -375,17 +382,10 @@ async function extractIntent(env: Env, query: string): Promise<Intent> {
     };
   }
 
-  const models = [
-    env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
-    ...GEMINI_FALLBACK_MODELS,
-  ];
-  const tried = new Set<string>();
-  let lastError = "";
+  const model = env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const errors: string[] = [];
 
-  for (const model of models) {
-    if (!model || tried.has(model)) continue;
-    tried.add(model);
-
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       const res = await fetch(
         `${GEMINI_ENDPOINT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
@@ -406,8 +406,26 @@ async function extractIntent(env: Env, query: string): Promise<Intent> {
       );
 
       if (!res.ok) {
-        lastError = `gemini ${model}: HTTP ${res.status}`;
-        continue;
+        let detail = "";
+        try {
+          const err = (await res.json()) as {
+            error?: { status?: string; message?: string };
+          };
+          detail = err.error?.status || err.error?.message?.slice(0, 90) || "";
+        } catch {
+          detail = "";
+        }
+        errors.push(
+          `${model}: HTTP ${res.status}${detail ? ` ${detail}` : ""}`.slice(0, 120),
+        );
+        // 400 also proves transient here: the identical body succeeds on retry.
+        const retryable =
+          res.status === 400 || res.status === 429 || res.status >= 500;
+        if (retryable && attempt < 3) {
+          await sleep(350 * attempt);
+          continue;
+        }
+        break;
       }
 
       const data = (await res.json()) as GeminiResponse;
@@ -420,17 +438,24 @@ async function extractIntent(env: Env, query: string): Promise<Intent> {
       if (parsed) {
         return { ...parsed, engine: "gemini", model };
       }
-      lastError = `gemini ${model}: unparseable response`;
+      errors.push(`${model}: unparseable response`);
+      break;
     } catch (error) {
-      lastError = `gemini ${model}: ${
-        error instanceof Error ? error.message : String(error)
-      }`;
+      errors.push(
+        `${model}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      if (attempt < 3) {
+        await sleep(400);
+        continue;
+      }
+      break;
     }
   }
 
   return {
     ...fallback,
-    note: lastError || "Gemini unavailable — heuristic parser used",
+    note:
+      errors.join(" | ").slice(0, 180) || "Gemini unavailable — heuristic parser used",
   };
 }
 
@@ -511,10 +536,38 @@ function demoProducts(source: SourceId, keyword: string, fx: number): Product[] 
   });
 }
 
+/** CJ prices arrive as "28.62" or a range "7.35 -- 16.40" (USD). Take the low end. */
+function parseCjPrice(raw: string): number | null {
+  const match = raw.match(/([0-9]+(?:\.[0-9]+)?)/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function cjImage(raw: string): string | null {
+  if (!raw) return null;
+  if (raw.startsWith("//")) return `https:${raw}`;
+  if (raw.startsWith("http")) return raw;
+  return null;
+}
+
+/**
+ * CJ ships an MCP server (cj-dropshipping-mcp 1.1.0). The legacy API-key URL is
+ * retired; the supported stateless form is /mcp/API@<userId>@CJ:<accessToken>.
+ * No session header is issued, so each tools/call is a single POST.
+ */
+function cjMcpEndpoint(env: Env): string | null {
+  const user = (env.CJ_MCP_USER ?? "").trim();
+  const token = (env.CJ_MCP_ACCESS_TOKEN ?? "").trim();
+  if (!user || !token) return null;
+  return `https://developers.cjdropshipping.com/mcp/API@${user}@CJ:${token}`;
+}
+
 async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOutcome> {
   const started = Date.now();
+  const endpoint = cjMcpEndpoint(env);
 
-  if (!env.CJ_ACCESS_TOKEN) {
+  if (!endpoint) {
     const items = demoProducts("cj", keyword, fx);
     return {
       report: {
@@ -522,7 +575,7 @@ async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOu
           "cj",
           "placeholder",
           Date.now() - started,
-          "CJ_ACCESS_TOKEN not set — demo catalogue",
+          "CJ_MCP_USER / CJ_MCP_ACCESS_TOKEN not set — demo catalogue",
         ),
         count: items.length,
       },
@@ -530,25 +583,24 @@ async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOu
     };
   }
 
-  // TODO(cj): confirm against https://developers.cjdropshipping.com/api2.0/v1/
-  // The exact product-search path/params change between API revisions; this is
-  // the documented list endpoint shape used as a placeholder.
   try {
-    const base = env.CJ_BASE_URL || "https://developers.cjdropshipping.com/api2.0/v1";
-    const res = await fetch(`${base}/product/list`, {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "CJ-Access-Token": env.CJ_ACCESS_TOKEN,
+        Accept: "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2024-11-05",
       },
       body: JSON.stringify({
-        pageNum: 1,
-        pageSize: 20,
-        productNameEn: keyword,
-        countryCode: "MY",
-        isWarehouse: false,
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "search_products",
+          arguments: { keyword },
+        },
       }),
-      signal: timeoutSignal(8000),
+      signal: timeoutSignal(12000),
     });
 
     if (!res.ok) {
@@ -557,29 +609,66 @@ async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOu
           "cj",
           "error",
           Date.now() - started,
-          `CJ API HTTP ${res.status}`,
+          `CJ MCP HTTP ${res.status}`,
         ),
         items: [],
       };
     }
 
-    const data = (await res.json()) as Record<string, unknown>;
-    const result = (data.result ?? data.data ?? {}) as Record<string, unknown>;
-    const rows = (Array.isArray(result.list)
-      ? result.list
-      : Array.isArray(result.content)
-        ? result.content
-        : []) as Array<Record<string, unknown>>;
+    const data = (await res.json()) as {
+      result?: { content?: Array<{ text?: string }>; isError?: boolean };
+      error?: { message?: string };
+    };
+
+    if (data.error) {
+      return {
+        report: emptyReport(
+          "cj",
+          "error",
+          Date.now() - started,
+          `CJ MCP: ${data.error.message ?? "rpc error"}`.slice(0, 160),
+        ),
+        items: [],
+      };
+    }
+
+    // Tool output is prose + JSON ("📋 Found N products total. {...}").
+    const text = (data.result?.content ?? [])
+      .map((part) => part.text ?? "")
+      .join("\n");
+    const start = text.indexOf("{");
+    if (start === -1) {
+      return {
+        report: emptyReport(
+          "cj",
+          "error",
+          Date.now() - started,
+          `CJ MCP: ${(text || "empty tool output").slice(0, 140)}`,
+        ),
+        items: [],
+      };
+    }
+
+    const payload = JSON.parse(text.slice(start)) as Record<string, unknown>;
+    const content = Array.isArray(payload.content)
+      ? (payload.content as Array<Record<string, unknown>>)
+      : [];
+    const first = content[0] ?? {};
+    const rows = Array.isArray(first.productList)
+      ? (first.productList as Array<Record<string, unknown>>)
+      : [];
 
     const items: Product[] = [];
     for (const row of rows) {
-      const title = str(pick(row, ["productNameEn", "productName"]));
-      const id = str(pick(row, ["pid", "productSku", "id"]));
-      const priceUsd = num(pick(row, ["sellPrice", "productSellPrice", "price"]));
+      const title = str(pick(row, ["nameEn", "productNameEn", "name"]));
+      const id = str(pick(row, ["id", "pid"]));
+      const priceUsd = parseCjPrice(str(pick(row, ["sellPrice", "nowPrice"])));
       if (!title || priceUsd === null) continue;
 
       const shipping = DEFAULT_SHIPPING.cj;
       const price = round2(priceUsd * fx);
+      const moq = num(pick(row, ["directMinOrderNum", "moq"]));
+
       items.push({
         id: id || `cj-${hash(title)}`,
         source: "cj",
@@ -588,9 +677,11 @@ async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOu
         price_myr: price,
         total_myr: round2(price + shipping.cost_myr),
         shipping,
-        image: str(pick(row, ["productImage", "imageUrl", "image"])) || null,
-        url: `https://www.cjdropshipping.com/product-detail.html?pid=${encodeURIComponent(id)}`,
-        moq: num(pick(row, ["moq", "minOrderQuantity"])) ?? 1,
+        image: cjImage(str(pick(row, ["bigImage", "productImage", "image"]))),
+        url: id
+          ? `https://www.cjdropshipping.com/product/-p-${id}.html`
+          : `https://www.cjdropshipping.com/search.html?productNameEn=${encodeURIComponent(keyword)}`,
+        moq: moq && moq > 0 ? moq : 1,
         rating: null,
         orders: null,
         demo: false,
@@ -599,11 +690,7 @@ async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOu
 
     return {
       report: {
-        ...emptyReport(
-          "cj",
-          items.length ? "ok" : "empty",
-          Date.now() - started,
-        ),
+        ...emptyReport("cj", items.length ? "ok" : "empty", Date.now() - started),
         count: items.length,
       },
       items,
@@ -614,7 +701,7 @@ async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOu
         "cj",
         "error",
         Date.now() - started,
-        error instanceof Error ? error.message : "CJ fetch failed",
+        (error instanceof Error ? error.message : "CJ fetch failed").slice(0, 160),
       ),
       items: [],
     };
@@ -717,13 +804,37 @@ async function searchAliExpress(
     }
 
     const data = (await res.json()) as Record<string, unknown>;
+
+    // The gateway answers HTTP 200 even for permission/parameter errors.
+    const apiError = (data.error_response ?? {}) as Record<string, unknown>;
+    if (apiError && Object.keys(apiError).length > 0) {
+      const code = str(pick(apiError, ["code", "type"])) || "error";
+      const message =
+        str(pick(apiError, ["msg", "message"])) || "AliExpress rejected the call";
+      return {
+        report: emptyReport(
+          "aliexpress",
+          "error",
+          Date.now() - started,
+          `AliExpress ${code}: ${message}${code === "InsufficientPermission" ? " (enable Affiliate API in Open Platform)" : ""}`.slice(0, 200),
+        ),
+        items: [],
+      };
+    }
+
     const response = (data.aliexpress_affiliate_product_query_response ??
       {}) as Record<string, unknown>;
     const result = (response.resp_result ?? {}) as Record<string, unknown>;
     const nested = (result.result ?? {}) as Record<string, unknown>;
-    const rows = (Array.isArray(nested.products)
-      ? nested.products
-      : []) as Array<Record<string, unknown>>;
+    const productNode = nested.products as unknown;
+    const productList = (productNode ?? {}) as Record<string, unknown>;
+    const rows = (
+      Array.isArray(productNode)
+        ? productNode
+        : Array.isArray(productList.product)
+          ? (productList.product as unknown[])
+          : []
+    ) as Array<Record<string, unknown>>;
 
     const items: Product[] = [];
     for (const row of rows) {
@@ -1246,7 +1357,9 @@ app.get("/health", (c) =>
     version: VERSION,
     time: new Date().toISOString(),
     gemini_configured: Boolean(c.env.GEMINI_API_KEY),
-    cj_configured: Boolean(c.env.CJ_ACCESS_TOKEN),
+    cj_configured: Boolean(
+      (c.env.CJ_MCP_USER && c.env.CJ_MCP_ACCESS_TOKEN) || c.env.CJ_ACCESS_TOKEN,
+    ),
     aliexpress_configured: Boolean(
       c.env.ALIEXPRESS_APP_KEY && c.env.ALIEXPRESS_APP_SECRET,
     ),
