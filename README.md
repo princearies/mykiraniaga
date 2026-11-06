@@ -42,18 +42,33 @@ Query params: `q` (2–200 aksara), `format=json\|html`, `lang=ms\|en`, `limit=1
 7. **Bilingual** — dropdown `BM / EN` di atas kanan; pilihan disimpan dalam cookie
    `mkn_lang` (30 hari) dan dibawa dalam semua pautan.
 8. **Status sistem** — panel di landing page tunjuk sama ada `GEMINI_API_KEY`, `CJ_API_KEY`
-   (+`CJ_MCP_USER`), `ALIEXPRESS_APP_KEY` dan `WHATSAPP_ORDER_NUMBER` sudah dipasang.
+   (+`CJ_MCP_USER`), `ALIEXPRESS_ADMIN_KEY` dan `WHATSAPP_ORDER_NUMBER` sudah dipasang.
 
 ## Sumber data
 
 | Sumber | Cara | Status |
 |---|---|---|
 | CJ Dropshipping | MCP `cj-dropshipping-mcp 1.1.0`, tool `search_products` (`/mcp/API@<userId>@CJ:<token>`) | ✅ live |
-| AliExpress | Open Platform `aliexpress.affiliate.product.query` (HMAC-SHA256) | ⚠️ app tiada permission (`InsufficientPermission`) |
+| AliExpress | Gateway MyKiraShop (`aliexpress.ds.text.search` + OAuth token/refresh di worker itu), dipanggil melalui **service binding** `MYKIRASHOP` | ✅ live |
 | Demo | katalog deterministik 4 produk/sumber bila kredensial tiada | ✅ fallback |
 
 Sumber hidup yang gagal dilapor sebagai `status: "error"` + `note`, dengan 0 item — demo
 tidak dicampur dengan data hidup.
+
+Nota AliExpress: app 557402 berkategori **Drop Shipping**, jadi API *affiliate*
+(`aliexpress.affiliate.product.query`) pulang `InsufficientPermission`, dan API `ds.*`
+perlukan `access_token` penjual (`IllegalAccessToken` tanpa ia). Token itu sudah diurus
+oleh worker MyKiraShop, jadi `mykiraniaga` guna gateway tersebut:
+`GET /aliexpress/search?keyword=...&currency=MYR` dengan header `x-admin-key`.
+
+Worker-ke-worker melalui hostname `*.workers.dev` dalam zone yang sama pulang 404, sebab
+itu ia dipanggil melalui service binding:
+
+```toml
+[[services]]
+binding = "MYKIRASHOP"
+service = "mykirashop"
+```
 
 ## Config (wrangler vars)
 
@@ -64,6 +79,7 @@ tidak dicampur dengan data hidup.
 | `WHATSAPP_ORDER_NUMBER` | `60173735431` | Nombor order (digit sahaja) |
 | `DEFAULT_USD_MYR` | `4.72` | Kadar tukar USD → MYR |
 | `GEMINI_MODEL` | `gemini-flash-lite-latest` | Model intent |
+| `ALIEXPRESS_GATEWAY_URL` | worker MyKiraShop | Override URL gateway |
 
 ## Secrets
 
@@ -71,8 +87,9 @@ tidak dicampur dengan data hidup.
 wrangler secret put GEMINI_API_KEY        # wajib untuk intent AI
 wrangler secret put CJ_MCP_USER           # CJ account id
 wrangler secret put CJ_MCP_ACCESS_TOKEN   # CJ MCP JWT (alias: CJ_API_KEY)
-wrangler secret put ALIEXPRESS_APP_KEY
-wrangler secret put ALIEXPRESS_APP_SECRET
+wrangler secret put ALIEXPRESS_ADMIN_KEY    # x-admin-key gateway MyKiraShop
+wrangler secret put ALIEXPRESS_APP_KEY      # pilihan (affiliate API)
+wrangler secret put ALIEXPRESS_APP_SECRET   # pilihan
 ```
 
 Jangan letak secret dalam `wrangler.toml`.

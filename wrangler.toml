@@ -6,6 +6,11 @@ workers_dev = true
 [observability]
 enabled = true
 
+# Worker-to-worker call for the AliExpress gateway (has the OAuth token).
+[[services]]
+binding = "MYKIRASHOP"
+service = "mykirashop"
+
 [vars]
 GEMINI_MODEL = "gemini-flash-lite-latest"
 ALIEXPRESS_BASE_URL = "https://api-sg.aliexpress.com/sync"

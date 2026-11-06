@@ -46,6 +46,12 @@ export interface Env {
   ALIEXPRESS_APP_SECRET?: string;
   ALIEXPRESS_TRACKING_ID?: string;
   ALIEXPRESS_BASE_URL?: string;
+  /** MyKiraShop AliExpress gateway (holds the OAuth token + refresh loop). */
+  ALIEXPRESS_GATEWAY_URL?: string;
+  /** x-admin-key for the gateway. */
+  ALIEXPRESS_ADMIN_KEY?: string;
+  /** Service binding to the MyKiraShop worker (avoids same-zone 404). */
+  MYKIRASHOP?: Fetcher;
   /** CJ MCP token alias — accepted when CJ_MCP_ACCESS_TOKEN is absent. */
   CJ_API_KEY?: string;
   /** USD -> MYR rate used to normalise USD-priced sources. */
@@ -302,10 +308,13 @@ function configStatus(env: Env): ConfigStatus {
           : "tiada — CJ guna katalog demo",
     },
     aliexpress: {
-      key: "ALIEXPRESS_APP_KEY",
-      configured: Boolean(aeKey && aeSecret),
-      detail:
-        aeKey && aeSecret
+      key: "ALIEXPRESS_ADMIN_KEY",
+      configured: Boolean(
+        (env.ALIEXPRESS_ADMIN_KEY ?? "").trim() || (aeKey && aeSecret),
+      ),
+      detail: (env.ALIEXPRESS_ADMIN_KEY ?? "").trim()
+        ? "live via MyKiraShop gateway"
+        : aeKey && aeSecret
           ? "kredensial ada · perlu kebenaran Affiliate API"
           : "tiada — AE guna katalog demo",
     },
@@ -902,12 +911,156 @@ function aliexpressTimestamp(): string {
   return shifted.toISOString().replace("T", " ").slice(0, 19);
 }
 
+const AE_GATEWAY_DEFAULT = "https://mykirashop.mykira.workers.dev/aliexpress/search";
+
+function aeGatewayUrl(env: Env): string | null {
+  const key = (env.ALIEXPRESS_ADMIN_KEY ?? "").trim();
+  if (!key) return null;
+  return (env.ALIEXPRESS_GATEWAY_URL ?? AE_GATEWAY_DEFAULT).trim() || null;
+}
+
+/**
+ * Primary AliExpress path: a Drop Shipping app gets `InsufficientPermission` on
+ * the affiliate API and `IllegalAccessToken` on ds.* without a seller OAuth
+ * token, so we reuse the MyKiraShop gateway which already owns a refreshed
+ * AliExpress token. Prices are requested in MYR, so no FX conversion is needed.
+ */
+async function searchAliExpressGateway(
+  env: Env,
+  keyword: string,
+  started: number,
+): Promise<SourceOutcome | null> {
+  const url = aeGatewayUrl(env);
+  if (!url) return null;
+
+  try {
+    const endpoint = new URL(url);
+    endpoint.searchParams.set("keyword", keyword);
+    endpoint.searchParams.set("countryCode", "MY");
+    endpoint.searchParams.set("currency", "MYR");
+    endpoint.searchParams.set("pageSize", "20");
+
+    const headers = {
+      "x-admin-key": (env.ALIEXPRESS_ADMIN_KEY ?? "").trim(),
+      Accept: "application/json",
+    };
+
+    // A Worker fetching another workers.dev host on the same zone resolves to
+    // the zone route (404). The service binding bypasses the public edge.
+    const res = env.MYKIRASHOP
+      ? await env.MYKIRASHOP.fetch(
+          new Request(
+            `https://mykirashop/aliexpress/search${endpoint.search}`,
+            { headers },
+          ),
+        )
+      : await fetch(endpoint.toString(), {
+          headers,
+          signal: timeoutSignal(15000),
+        });
+
+    if (!res.ok) {
+      return {
+        report: emptyReport(
+          "aliexpress",
+          "error",
+          Date.now() - started,
+          `AE gateway HTTP ${res.status}`,
+        ),
+        items: [],
+      };
+    }
+
+    const data = (await res.json()) as {
+      success?: boolean;
+      message?: string;
+      products?: Array<Record<string, unknown>>;
+    };
+
+    if (!data.success) {
+      return {
+        report: emptyReport(
+          "aliexpress",
+          "error",
+          Date.now() - started,
+          `AE gateway: ${String(data.message ?? "unknown error").slice(0, 140)}`,
+        ),
+        items: [],
+      };
+    }
+
+    const rows = Array.isArray(data.products) ? data.products : [];
+    const shipping = DEFAULT_SHIPPING.aliexpress;
+    const items: Product[] = [];
+
+    for (const row of rows) {
+      const title = str(row.title);
+      const id = str(pick(row, ["itemId", "item_id", "product_id"]));
+      const price = num(pick(row, ["price", "salePrice", "target_sale_price"]));
+      if (!title || price === null || price <= 0) continue;
+
+      let image = str(pick(row, ["image", "itemMainPic"])) || null;
+      if (image && image.startsWith("//")) image = `https:${image}`;
+
+      let productUrl = str(pick(row, ["itemUrl", "product_detail_url"]));
+      if (productUrl.startsWith("//")) productUrl = `https:${productUrl}`;
+      if (!productUrl && id) {
+        productUrl = `https://www.aliexpress.com/item/${encodeURIComponent(id)}.html`;
+      }
+
+      items.push({
+        id: id || `ae-${hash(title)}`,
+        source: "aliexpress",
+        source_label: SOURCE_META.aliexpress.label,
+        title,
+        price_myr: round2(price),
+        total_myr: round2(price + shipping.cost_myr),
+        shipping,
+        image,
+        url: productUrl,
+        moq: 1,
+        rating: num(pick(row, ["evaluateRate", "score", "rating"])),
+        orders: num(pick(row, ["orders", "lastest_volume"])),
+        demo: false,
+      });
+    }
+
+    return {
+      report: {
+        ...emptyReport(
+          "aliexpress",
+          items.length ? "ok" : "empty",
+          Date.now() - started,
+        ),
+        count: items.length,
+        ...(items.length ? { note: "via MyKiraShop gateway" } : {}),
+      },
+      items,
+    };
+  } catch (error) {
+    return {
+      report: emptyReport(
+        "aliexpress",
+        "error",
+        Date.now() - started,
+        `AE gateway: ${
+          error instanceof Error ? error.message : "fetch failed"
+        }`.slice(0, 160),
+      ),
+      items: [],
+    };
+  }
+}
+
 async function searchAliExpress(
   env: Env,
   keyword: string,
   fx: number,
 ): Promise<SourceOutcome> {
   const started = Date.now();
+
+  const viaGateway = await searchAliExpressGateway(env, keyword, started);
+  if (viaGateway) return viaGateway;
 
   if (!env.ALIEXPRESS_APP_KEY || !env.ALIEXPRESS_APP_SECRET) {
     const items = demoProducts("aliexpress", keyword, fx);

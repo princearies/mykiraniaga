@@ -35,7 +35,7 @@ console.log("1) landing page + system status");
   check("status panel", body.includes("Status sistem"));
   check("gemini key row", body.includes("GEMINI_API_KEY"));
   check("cj key row", body.includes("CJ_API_KEY"));
-  check("aliexpress key row", body.includes("ALIEXPRESS_APP_KEY"));
+  check("aliexpress key row", body.includes("ALIEXPRESS_ADMIN_KEY"));
   check("margin shown", body.includes("Margin <b>20%"));
 }
 
