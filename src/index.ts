@@ -1223,13 +1223,17 @@ function applyBudget(
   return { items: kept, removed: items.length - kept.length };
 }
 
-async function runSearch(env: Env, rawQuery: string, limit: number): Promise<SearchPayload> {
+async function runSearchWithIntent(
+  env: Env,
+  rawQuery: string,
+  intent: Intent,
+  limit: number,
+): Promise<SearchPayload> {
   const started = Date.now();
   const fx = fxRate(env);
   const pricing = pricingFromEnv(env);
   const config = configStatus(env);
 
-  const intent = await extractIntent(env, rawQuery);
   const keyword = intent.keyword || rawQuery;
 
   // Parallel, non-throwing adapters (supplier-level prices).
@@ -1274,6 +1278,262 @@ async function runSearch(env: Env, rawQuery: string, limit: number): Promise<Sea
       sources,
     },
   };
+}
+async function runSearch(env: Env, rawQuery: string, limit: number): Promise<SearchPayload> {
+  const intent = await extractIntent(env, rawQuery);
+  return runSearchWithIntent(env, rawQuery, intent, limit);
+}
+
+/* ------------------------------------------------------------------ */
+/* Conversational chat (multi-turn Gemini memory + agentic rendering)  */
+/* ------------------------------------------------------------------ */
+
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatResult {
+  reply: string;
+  keyword: string | null;
+  max_price_myr: number | null;
+  ready: boolean;
+  engine: "gemini" | "heuristic";
+  model?: string;
+  note?: string;
+}
+
+const CHAT_MAX_TURNS = 12;
+
+const CHAT_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    reply: {
+      type: "STRING",
+      description:
+        "Short conversational reply in the user's language (Malay or English), max 2 sentences. Ask exactly one clarifying question when something is missing.",
+    },
+    keyword: {
+      type: "STRING",
+      nullable: true,
+      description:
+        "English product keyword (2-6 words) once the product is clear, else null. Keep the keyword from earlier turns when the user only adds a budget.",
+    },
+    max_price_myr: {
+      type: "NUMBER",
+      nullable: true,
+      description:
+        "Budget ceiling in MYR. Convert USD with x4.72. Null when the user has not given a budget.",
+    },
+    ready: {
+      type: "BOOLEAN",
+      description:
+        "True when a product keyword is clear enough to search now. A budget is optional.",
+    },
+  },
+  required: ["reply", "keyword", "max_price_myr", "ready"],
+  propertyOrdering: ["reply", "keyword", "max_price_myr", "ready"],
+};
+
+function chatSystemPrompt(): string {
+  return [
+    "You are MyKiraNiaga, a Malaysian dropshipping shopping assistant.",
+    "You keep context across turns and help the user narrow down what to buy.",
+    "",
+    "Return JSON with: reply, keyword, max_price_myr, ready.",
+    "- reply: 1-2 short sentences in the user's language (Malay or English).",
+    "- keyword: English product words only (2-6 words). NEVER include budget words (budget, cheap, murah, bajet), currency or numbers.",
+    "- max_price_myr: numeric MYR budget (USD x4.72); null if not given.",
+    "- ready: true as soon as the product keyword is clear. A budget is OPTIONAL and must never block a search.",
+    "",
+    "Conversation rules:",
+    "- If the user only gives a budget, keep the previous keyword and set ready=true.",
+    "- If the product is still vague, ask ONE short clarifying question and ready=false.",
+    "- Never invent prices, stock or shipping.",
+    "- Do not write markdown, emojis or lists longer than one line.",
+  ].join("\n");
+}
+
+function sanitizeMessages(raw: unknown): ChatMessage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ChatMessage[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    const role = str(row.role).toLowerCase();
+    const content = str(row.content || row.text).slice(0, 1000).trim();
+    if (!content) continue;
+    if (role !== "user" && role !== "assistant" && role !== "model") continue;
+    out.push({ role: role === "user" ? "user" : "assistant", content });
+  }
+  return out.slice(-CHAT_MAX_TURNS);
+}
+
+/** Keyword-only extraction; budget phrases and bare numbers never become a keyword. */
+function cleanKeyword(text: string): string | null {
+  const parsed = heuristicIntent(text);
+  const candidate = parsed.keyword.replace(/\s+/g, " ").trim();
+  if (!candidate || candidate.length < 3) return null;
+  if (/^[0-9.,\s]+$/.test(candidate)) return null;
+  if (/^(rm|myr|usd|bawah|under|below|max|maks|budget|bajet)\b/i.test(candidate)) {
+    return null;
+  }
+  return candidate;
+}
+
+function heuristicChat(messages: ChatMessage[], lang: Lang): ChatResult {
+  const userTurns = messages.filter((m) => m.role === "user");
+  const last = userTurns[userTurns.length - 1]?.content ?? "";
+
+  let keyword: string | null = null;
+  let budget: number | null = null;
+
+  for (let i = userTurns.length - 1; i >= 0; i -= 1) {
+    const parsed = heuristicIntent(userTurns[i].content);
+    if (budget === null && parsed.max_price_myr !== null) {
+      budget = parsed.max_price_myr;
+    }
+    if (keyword === null) {
+      const candidate = cleanKeyword(userTurns[i].content);
+      if (candidate) keyword = candidate;
+    }
+    if (keyword && budget !== null) break;
+  }
+
+  const ready = Boolean(keyword);
+  const reply = !ready
+    ? lang === "en"
+      ? "What product are you looking for? Give me a keyword or a category."
+      : "Awak nak cari produk apa? Bagi kata kunci atau kategori dulu."
+    : budget === null
+      ? lang === "en"
+        ? `Got it — looking for "${keyword}". Any maximum budget?`
+        : `Baik, saya cari "${keyword}". Ada bajet maksimum?`
+      : lang === "en"
+        ? `Searching "${keyword}" under ${money(budget)}.`
+        : `Mencari "${keyword}" bawah ${money(budget)}.`;
+
+  return {
+    reply,
+    keyword,
+    max_price_myr: budget,
+    ready,
+    engine: "heuristic",
+    note: last ? undefined : "no user message",
+  };
+}
+
+async function chatTurn(env: Env, messages: ChatMessage[], lang: Lang): Promise<ChatResult> {
+  const fallback = heuristicChat(messages, lang);
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return { ...fallback, note: "GEMINI_API_KEY not configured — heuristic chat" };
+  }
+
+  const model = env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const contents = messages.map((message) => ({
+    role: message.role === "user" ? "user" : "model",
+    parts: [{ text: message.content }],
+  }));
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const res = await fetch(
+        `${GEMINI_ENDPOINT}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: chatSystemPrompt() }] },
+            contents,
+            generationConfig: {
+              temperature: 0.4,
+              maxOutputTokens: 320,
+              responseMimeType: "application/json",
+              responseSchema: CHAT_SCHEMA,
+            },
+          }),
+          signal: timeoutSignal(9000),
+        },
+      );
+
+      if (!res.ok) {
+        if (attempt === 1) {
+          await sleep(350);
+          continue;
+        }
+        return {
+          ...fallback,
+          note: `gemini chat: HTTP ${res.status} — heuristic chat`,
+        };
+      }
+
+      const data = (await res.json()) as GeminiResponse;
+      const text = (data.candidates?.[0]?.content?.parts ?? [])
+        .map((part) => part.text ?? "")
+        .join("")
+        .trim();
+
+      const parsed = parseChatJson(text);
+      if (parsed) return { ...parsed, engine: "gemini", model };
+      if (attempt === 1) {
+        await sleep(300);
+        continue;
+      }
+      return { ...fallback, note: "gemini chat: unparseable response" };
+    } catch (error) {
+      if (attempt === 1) {
+        await sleep(300);
+        continue;
+      }
+      return {
+        ...fallback,
+        note: `gemini chat: ${
+          error instanceof Error ? error.message : "fetch failed"
+        }`,
+      };
+    }
+  }
+
+  return fallback;
+}
+
+function parseChatJson(text: string): Omit<ChatResult, "engine"> | null {
+  if (!text) return null;
+  const cleaned = text
+    .replace(/^\s*```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/, "")
+    .trim();
+  const start = cleaned.indexOf("{");
+  const end = cleaned.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+
+  const row = parsed as Record<string, unknown>;
+  const reply = str(row.reply).slice(0, 400);
+  if (!reply) return null;
+
+  const keywordRaw = str(row.keyword).replace(/\s+/g, " ").trim();
+  const keyword =
+    keywordRaw && keywordRaw.toLowerCase() !== "null"
+      ? cleanKeyword(keywordRaw)
+      : null;
+
+  const price = num(row.max_price_myr);
+  const maxPrice =
+    price !== null && price > 0 && price < 1_000_000 ? round2(price) : null;
+
+  const ready =
+    (row.ready === true || str(row.ready) === "true") && Boolean(keyword);
+
+  return { reply, keyword, max_price_myr: maxPrice, ready };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1388,6 +1648,30 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .langlist a:hover{background:#132441;text-decoration:none}
 .langlist a.active{color:#22d3ee;font-weight:700}
 .top nav{align-items:center}
+.top nav a{white-space:nowrap}
+.chatwrap{margin-top:8px}
+.chatlog{display:flex;flex-direction:column;gap:12px;background:#0b1524;border:1px solid #1a2a42;border-radius:16px;padding:18px;min-height:280px;max-height:60vh;overflow-y:auto;scroll-behavior:smooth}
+.msg{display:flex;gap:10px}
+.msg.me{justify-content:flex-end}
+.bubble{max-width:min(680px,92%);background:#101d31;border:1px solid #1e2f4a;border-radius:14px;padding:11px 14px;font-size:14.5px;white-space:pre-wrap;word-break:break-word;color:#e6eefc}
+.msg.me .bubble{background:linear-gradient(135deg,#123049,#173a56);border-color:#245b7a}
+.bubble.products{max-width:100%;width:100%;background:transparent;border:0;padding:0}
+.bubble.products .grid{grid-template-columns:repeat(auto-fill,minmax(208px,1fr));gap:12px}
+.chatcompose{display:flex;gap:8px;margin-top:12px;background:#0f1b2e;border:1px solid #1e2f4a;border-radius:15px;padding:7px}
+.chatcompose:focus-within{border-color:#2c6d8a;box-shadow:0 0 0 3px rgba(34,211,238,.09)}
+.chatcompose textarea{flex:1;resize:none;background:transparent;border:0;outline:none;color:#e6eefc;font:inherit;font-size:15px;padding:10px 12px;max-height:120px;line-height:1.4}
+.chatcompose textarea::placeholder{color:#63799b}
+.chatcompose button{border:0;border-radius:10px;padding:0 18px;font-weight:700;font-size:14.5px;background:linear-gradient(135deg,#22d3ee,#7dd3fc);color:#04121c;cursor:pointer;font-family:inherit}
+.chatcompose button:disabled{opacity:.55;cursor:progress}
+.typing{display:flex;gap:8px;align-items:center;color:#8fa3c4;font-size:12.5px;margin-top:10px}
+.dot{width:6px;height:6px;border-radius:50%;background:#22d3ee;opacity:.35;animation:blink 1.1s infinite}
+.dot:nth-child(2){animation-delay:.15s}.dot:nth-child(3){animation-delay:.3s}
+@keyframes blink{0%,80%,100%{opacity:.2}40%{opacity:1}}
+.quickchips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.quickchips button{font:inherit;font-size:12.5px;color:#b9cbe6;background:#101d31;border:1px solid #1e2f4a;border-radius:999px;padding:6px 12px;cursor:pointer}
+.quickchips button:hover{border-color:#2c6d8a;color:#e6eefc}
+.chattools{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px;font-size:12px;color:#7c93b8;flex-wrap:wrap}
+.chattools button{background:none;border:0;color:#7dd3fc;cursor:pointer;font:inherit;font-size:12px;padding:0}
 `;
 
 /* ------------------------------------------------------------------ */
@@ -1463,6 +1747,22 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     meta_invalid_title: "Pertanyaan tidak sah — MyKiraNiaga",
     meta_checkout_title: "Checkout tidak sah — MyKiraNiaga",
     meta_order_desc: "Semak pesanan",
+    nav_chat: "Chat",
+    nav_search: "Carian",
+    chat_h1: "Tanya je — saya carikan.",
+    chat_lede:
+      "Berbual macam biasa: sebut produk, kemudian bajet. Saya cari di CJ + AliExpress dan tunjuk kad produk terus dalam chat.",
+    chat_placeholder: "cth: nak cari laptop murah",
+    chat_send: "Hantar",
+    chat_clear: "Kosongkan chat",
+    chat_greeting:
+      "Hai! Awak nak cari produk apa? Boleh sebut jenis produk dan bajet sekali.",
+    chat_suggest_1: "Nak cari laptop murah",
+    chat_suggest_2: "Earbuds bawah RM80",
+    chat_suggest_3: "Beg kanvas untuk kerja",
+    chat_typing: "Sedang mencari…",
+    chat_empty: "Tak jumpa produk dalam bajet itu — cuba naikkan bajet.",
+    chat_hint: "Enter untuk hantar · Shift+Enter baris baru",
   },
   en: {
     tagline: "on-demand dropshipping search",
@@ -1530,6 +1830,22 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     meta_invalid_title: "Invalid query — MyKiraNiaga",
     meta_checkout_title: "Invalid checkout — MyKiraNiaga",
     meta_order_desc: "Review order",
+    nav_chat: "Chat",
+    nav_search: "Search",
+    chat_h1: "Just ask — I'll find it.",
+    chat_lede:
+      "Chat naturally: name the product, then the budget. I search CJ + AliExpress and drop product cards right into the chat.",
+    chat_placeholder: "e.g. cheap laptop under RM1500",
+    chat_send: "Send",
+    chat_clear: "Clear chat",
+    chat_greeting:
+      "Hi! What are you looking for? You can mention the product and budget together.",
+    chat_suggest_1: "Find a cheap laptop",
+    chat_suggest_2: "Earbuds under RM80",
+    chat_suggest_3: "Canvas bag for work",
+    chat_typing: "Searching…",
+    chat_empty: "No products inside that budget — try raising it.",
+    chat_hint: "Enter to send · Shift+Enter for a new line",
   },
 };
 
@@ -1569,6 +1885,8 @@ function layout(opts: {
       <span>MyKiraNiaga<small>${esc(t(lang, "tagline"))}</small></span>
     </a>
     <nav>
+      <a href="/">${esc(t(lang, "nav_chat"))}</a>
+      <a href="/search">${esc(t(lang, "nav_search"))}</a>
       <a href="/api">${esc(t(lang, "nav_api"))}</a>
       <a href="/health">${esc(t(lang, "nav_status"))}</a>
       <details class="langmenu">
@@ -1592,6 +1910,141 @@ function layout(opts: {
 </div>
 </body>
 </html>`;
+}
+
+function chatBody(env: Env, lang: Lang): string {
+  const suggestions = [
+    t(lang, "chat_suggest_1"),
+    t(lang, "chat_suggest_2"),
+    t(lang, "chat_suggest_3"),
+  ];
+  const errorText =
+    lang === "en" ? "Network error — try again." : "Ralat rangkaian — cuba lagi.";
+
+  const script = `
+(function () {
+  var log = document.getElementById("chatlog");
+  var form = document.getElementById("chatform");
+  var input = document.getElementById("chatinput");
+  var typing = document.getElementById("typing");
+  var sendBtn = form.querySelector("button[type=submit]");
+  var KEY = "mkn_chat_v1";
+  var LANG = ${JSON.stringify(lang)};
+  var GREETING = ${JSON.stringify(t(lang, "chat_greeting"))};
+  var ERROR = ${JSON.stringify(errorText)};
+  var history = [];
+  try { history = JSON.parse(sessionStorage.getItem(KEY) || "[]") || []; } catch (e) { history = []; }
+
+  function save() { try { sessionStorage.setItem(KEY, JSON.stringify(history.slice(-40))); } catch (e) {} }
+  function scroll() { log.scrollTop = log.scrollHeight; }
+
+  function bubble(role, text) {
+    var wrap = document.createElement("div");
+    wrap.className = "msg " + (role === "user" ? "me" : "bot");
+    var b = document.createElement("div");
+    b.className = "bubble";
+    b.textContent = text;
+    wrap.appendChild(b);
+    return wrap;
+  }
+
+  function render() {
+    log.innerHTML = "";
+    if (!history.length) { log.appendChild(bubble("assistant", GREETING)); }
+    for (var i = 0; i < history.length; i++) {
+      log.appendChild(bubble(history[i].role === "user" ? "user" : "assistant", history[i].content));
+    }
+    scroll();
+  }
+
+  function push(role, text) {
+    history.push({ role: role, content: text });
+    save();
+    log.appendChild(bubble(role, text));
+    scroll();
+  }
+
+  async function send(text) {
+    text = (text || "").trim();
+    if (!text) return;
+    push("user", text);
+    input.value = "";
+    typing.hidden = false;
+    sendBtn.disabled = true;
+    input.disabled = true;
+    try {
+      var res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: history, lang: LANG }),
+      });
+      var data = await res.json();
+      if (!data.ok) throw new Error(data.message || data.error || "error");
+      push("assistant", data.reply);
+      if (data.products_html) {
+        var holder = document.createElement("div");
+        holder.className = "msg bot";
+        var box = document.createElement("div");
+        box.className = "bubble products";
+        box.innerHTML = data.products_html;
+        holder.appendChild(box);
+        log.appendChild(holder);
+        scroll();
+      }
+    } catch (err) {
+      log.appendChild(bubble("assistant", "⚠ " + ERROR));
+      scroll();
+    } finally {
+      typing.hidden = true;
+      sendBtn.disabled = false;
+      input.disabled = false;
+      input.focus();
+    }
+  }
+
+  form.addEventListener("submit", function (ev) { ev.preventDefault(); send(input.value); });
+  input.addEventListener("keydown", function (ev) {
+    if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); send(input.value); }
+  });
+  var chips = document.querySelectorAll("[data-chip]");
+  for (var c = 0; c < chips.length; c++) {
+    chips[c].addEventListener("click", function () { send(this.getAttribute("data-chip")); });
+  }
+  var clear = document.getElementById("chatclear");
+  if (clear) clear.addEventListener("click", function () { history = []; save(); render(); input.focus(); });
+
+  render();
+})();
+`;
+
+  return `<h1>${esc(t(lang, "chat_h1"))}</h1>
+<p class="lede">${esc(t(lang, "chat_lede"))}</p>
+<section class="chatwrap">
+  <div id="chatlog" class="chatlog" aria-live="polite"></div>
+  <div id="typing" class="typing" hidden><span class="dot"></span><span class="dot"></span><span class="dot"></span> ${esc(
+    t(lang, "chat_typing"),
+  )}</div>
+  <form id="chatform" class="chatcompose" autocomplete="off">
+    <textarea id="chatinput" rows="1" placeholder="${esc(
+      t(lang, "chat_placeholder"),
+    )}" aria-label="${esc(t(lang, "chat_placeholder"))}"></textarea>
+    <button type="submit">${esc(t(lang, "chat_send"))}</button>
+  </form>
+  <div class="chattools">
+    <span>${esc(t(lang, "chat_hint"))}</span>
+    <button type="button" id="chatclear">${esc(t(lang, "chat_clear"))}</button>
+  </div>
+  <div class="quickchips">
+    ${suggestions
+      .map(
+        (suggestion) =>
+          `<button type="button" data-chip="${esc(suggestion)}">${esc(suggestion)}</button>`,
+      )
+      .join("")}
+  </div>
+</section>
+${statusPanel(env, lang)}
+<script>${script}</script>`;
 }
 
 function searchForm(q: string, autofocus: boolean, lang: Lang): string {
@@ -1891,15 +2344,20 @@ app.use("*", async (c, next) => {
 app.use("/api/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"], maxAge: 86400 }));
 
 app.get("/", (c) => {
+  const lang = langFrom(c);
+
   if (wantsJson(c)) {
     return c.json({
       service: SERVICE,
       version: VERSION,
       description:
-        "On-demand dropshipping search engine. Gemini Flash-Lite intent extraction, parallel CJ + AliExpress lookup, MYR normalisation, profit margin and WhatsApp checkout handoff.",
+        "On-demand dropshipping search engine with a conversational layer. Gemini Flash-Lite keeps multi-turn context, fires the CJ + AliExpress pipeline, and returns product cards with margin and WhatsApp checkout.",
       endpoints: {
-        "GET /search?q=": "HTML for humans, JSON when ?format=json or Accept: application/json",
-        "GET /api/search?q=": "JSON only",
+        "GET /": "chat UI (HTML) · this JSON when ?format=json or Accept: application/json",
+        "GET /chat": "chat UI alias",
+        "POST /api/chat": "multi-turn chat (JSON): {messages:[{role,content}], lang}",
+        "GET /search?q=": "classic results (HTML/JSON negotiated)",
+        "GET /api/search?q=": "search (JSON only)",
         "GET /checkout?source=&id=&base=": "order summary + WhatsApp handoff",
         "GET /health": "health probe + key status",
       },
@@ -1911,18 +2369,128 @@ app.get("/", (c) => {
     });
   }
 
-  const lang = langFrom(c);
   return c.html(
     layout({
-      title: t(lang, "meta_home_title"),
-      description: t(lang, "meta_home_desc"),
-      body: landingBody(c.env, lang),
+      title:
+        lang === "en"
+          ? "MyKiraNiaga — shopping chat"
+          : "MyKiraNiaga — chat beli-belah",
+      description: t(lang, "chat_lede"),
+      body: chatBody(c.env, lang),
       lang,
       currentUrl: c.req.url,
     }),
   );
 });
 
+app.get("/chat", (c) => {
+  if (wantsJson(c)) {
+    return c.json({
+      ok: true,
+      service: SERVICE,
+      endpoint: "POST /api/chat",
+      body: { messages: [{ role: "user", content: "nak cari laptop murah" }], lang: "ms|en" },
+    });
+  }
+
+  const lang = langFrom(c);
+  return c.html(
+    layout({
+      title:
+        lang === "en"
+          ? "MyKiraNiaga — shopping chat"
+          : "MyKiraNiaga — chat beli-belah",
+      description: t(lang, "chat_lede"),
+      body: chatBody(c.env, lang),
+      lang,
+      currentUrl: c.req.url,
+    }),
+  );
+});
+
+app.post("/api/chat", async (c) => {
+  let raw: unknown;
+  try {
+    raw = await c.req.json();
+  } catch {
+    return c.json(
+      { ok: false, error: "invalid_json", message: "Body mesti JSON." },
+      400,
+    );
+  }
+
+  const row = (raw ?? {}) as Record<string, unknown>;
+  const messages = sanitizeMessages(row.messages);
+  if (messages.length === 0) {
+    return c.json(
+      {
+        ok: false,
+        error: "missing_messages",
+        message: "Hantar messages: [{role:'user', content:'...'}].",
+      },
+      400,
+    );
+  }
+
+  const lang: Lang = row.lang === "en" ? "en" : "ms";
+  const lastUser =
+    [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
+
+  const chat = await chatTurn(c.env, messages, lang);
+
+  let search: SearchPayload | null = null;
+  if (chat.ready && chat.keyword) {
+    const intent: Intent = {
+      keyword: chat.keyword,
+      max_price_myr: chat.max_price_myr,
+      engine: chat.engine,
+      ...(chat.model ? { model: chat.model } : {}),
+      ...(chat.note ? { note: chat.note } : {}),
+    };
+    search = await runSearchWithIntent(
+      c.env,
+      lastUser || chat.keyword,
+      intent,
+      6,
+    );
+  }
+
+  const products = search?.results ?? [];
+  const cards = products.map((product) => productCard(product, lang)).join("\n");
+  const productsHtml = products.length ? `<div class="grid">${cards}</div>` : "";
+
+  let reply = chat.reply;
+  if (search && products.length === 0) {
+    reply = `${reply} ${t(lang, "chat_empty")}`.trim();
+  }
+
+  c.header("Cache-Control", "no-store");
+
+  return c.json({
+    ok: true,
+    reply,
+    lang,
+    intent: {
+      keyword: chat.keyword,
+      max_price_myr: chat.max_price_myr,
+      ready: chat.ready,
+      engine: chat.engine,
+      ...(chat.model ? { model: chat.model } : {}),
+      ...(chat.note ? { note: chat.note } : {}),
+    },
+    search: search
+      ? {
+          count: search.meta.count,
+          removed: search.budget.removed,
+          timing_ms: search.meta.timing_ms,
+          partial: search.meta.partial,
+          sources: search.meta.sources,
+        }
+      : null,
+    products,
+    products_html: productsHtml,
+  });
+});
 app.get("/search", async (c) => {
   const lang = langFrom(c);
   const rawQuery = (c.req.query("q") ?? "").trim();
@@ -2103,6 +2671,7 @@ app.get("/api", (c) =>
     service: SERVICE,
     version: VERSION,
     endpoints: {
+      "POST /api/chat": "multi-turn chat (JSON)",
       "GET /search?q=&format=json": "search (content negotiated)",
       "GET /api/search?q=": "search (JSON)",
       "GET /checkout?source=&id=&base=": "checkout summary (HTML or JSON)",

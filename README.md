@@ -14,7 +14,9 @@ order WhatsApp.
 
 | Route | Output |
 |---|---|
-| `GET /` | Landing page (HTML) · info JSON dengan `?format=json` |
+| `GET /` | **Chat UI** (HTML) · info JSON dengan `?format=json` |
+| `GET /chat` | Chat UI (alias) |
+| `POST /api/chat` | Chat multi-turn (JSON): `{messages:[{role,content}], lang}` |
 | `GET /search?q=...` | HTML untuk manusia · JSON bila `?format=json` atau `Accept: application/json` |
 | `GET /api/search?q=...` | JSON sahaja (bot) |
 | `GET /checkout?source=&id=&base=` | Ringkasan order + butang WhatsApp (HTML atau JSON) |
@@ -22,6 +24,41 @@ order WhatsApp.
 | `GET /health` | Status, key config, margin |
 
 Query params: `q` (2–200 aksara), `format=json\|html`, `lang=ms\|en`, `limit=1..40`.
+
+## Chat percakapan
+
+`GET /` sekarang buka chat. Sejarah disimpan dalam `sessionStorage` pelayar dan dihantar
+semula setiap turn — worker kekal stateless.
+
+```
+POST /api/chat
+{ "messages": [
+    {"role":"user","content":"Nak cari laptop murah"},
+    {"role":"assistant","content":"Bagi bajet?"},
+    {"role":"user","content":"Bawah RM1500"}
+  ], "lang":"ms" }
+```
+
+Gemini Flash-Lite terima **seluruh sejarah** (12 turn terakhir) + `responseSchema`:
+`{ reply, keyword, max_price_myr, ready }`. Bila `ready` dan `keyword` ada, pipeline
+CJ + AliExpress terus dijalankan dan kad produk (margin + butang Order) dipulangkan
+dalam `products_html` untuk disuntik ke dalam chat.
+
+Respons:
+
+```json
+{
+  "ok": true,
+  "reply": "Baik, saya carikan laptop bawah RM1500.",
+  "intent": {"keyword":"laptop","max_price_myr":1500,"ready":true,"engine":"gemini"},
+  "search": {"count":6,"removed":0,"timing_ms":5300,"sources":[...]},
+  "products": [ ... ],
+  "products_html": "<div class=\"grid\">...</div>"
+}
+```
+
+Tanpa `GEMINI_API_KEY` chat jatuh ke parser heuristik: kata kunci diambil dari turn
+terdahulu dan bajet dari turn terbaru, jadi aliran “produk → bajet” tetap berfungsi.
 
 ## Ciri utama
 

@@ -31,7 +31,9 @@ console.log("1) landing page + system status");
   check("status 200", res.status === 200, res.status);
   check("html content-type", (res.headers.get("content-type") ?? "").includes("text/html"));
   check("brand rendered", body.includes("MyKiraNiaga"));
-  check("search form", body.includes('action="/search"'));
+  check("chat compose form", body.includes('id="chatform"'));
+  const landing = await req("/search");
+  check("search form on /search", (await landing.text()).includes('action="/search"'));
   check("status panel", body.includes("Status sistem"));
   check("gemini key row", body.includes("GEMINI_API_KEY"));
   check("cj key row", body.includes("CJ_API_KEY"));
@@ -179,15 +181,15 @@ console.log("10) bilingual dropdown (ms default / en)");
 {
   const ms = await req("/");
   const msBody = await ms.text();
-  check("ms is default", msBody.includes("Cari produk dropship"));
+  check("ms is default", msBody.includes("Tanya je"));
   check("dropdown rendered", msBody.includes('class="langmenu"'));
   check("dropdown offers EN", msBody.includes(">English</a>"));
 
   const en = await req("/?lang=en");
   const enBody = await en.text();
-  check("en landing", enBody.includes("Find dropship products"));
+  check("en chat", enBody.includes("Just ask"));
   check("en status panel", enBody.includes("System status"));
-  check("en search button", enBody.includes(">Search</button>"));
+  check("en send button", enBody.includes(">Send</button>"));
   check(
     "lang cookie set",
     (en.headers.get("set-cookie") ?? "").includes("mkn_lang=en"),
@@ -208,6 +210,74 @@ console.log("10) bilingual dropdown (ms default / en)");
     "en checkout",
     checkoutText.includes("Confirm on WhatsApp") && checkoutText.includes("Total"),
   );
+}
+
+console.log("11) conversational chat");
+{
+  const page = await req("/");
+  const pageText = await page.text();
+  check("root serves chat UI", pageText.includes('id="chatlog"') && pageText.includes('id="chatform"'));
+  check("chat greeting", pageText.includes("Hai! Awak nak cari produk apa"));
+  check("chat quick chips", pageText.includes('data-chip="Nak cari laptop murah"'));
+
+  const alias = await req("/chat");
+  check("chat alias", (await alias.text()).includes('id="chatlog"'));
+
+  const one = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "nak cari laptop murah" }] }),
+  });
+  const oneData = await one.json();
+  check("chat ok", oneData.ok === true, JSON.stringify(oneData).slice(0, 160));
+  check("chat ready", oneData.intent?.ready === true);
+  check("chat keyword", oneData.intent?.keyword === "laptop", String(oneData.intent?.keyword));
+  check("chat reply text", typeof oneData.reply === "string" && oneData.reply.length > 5);
+  check("chat products", Array.isArray(oneData.products) && oneData.products.length > 0);
+  check("chat products html", oneData.products_html.includes('class="card"'));
+  check("chat order buttons", oneData.products_html.includes("Order →"));
+
+  const multi = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [
+        { role: "user", content: "nak cari laptop murah" },
+        { role: "assistant", content: "Bagi bajet?" },
+        { role: "user", content: "bawah RM1500" },
+      ],
+    }),
+  });
+  const multiData = await multi.json();
+  check("multi-turn keeps keyword", multiData.intent?.keyword === "laptop", String(multiData.intent?.keyword));
+  check("multi-turn picks budget", multiData.intent?.max_price_myr === 1500, String(multiData.intent?.max_price_myr));
+  check("multi-turn ready", multiData.intent?.ready === true);
+  check(
+    "budget filter applied",
+    (multiData.products ?? []).every((p) => p.total_myr <= 1500),
+  );
+
+  const english = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ lang: "en", messages: [{ role: "user", content: "cheap laptop" }] }),
+  });
+  const englishData = await english.json();
+  check("english reply", /laptop|budget|search/i.test(englishData.reply), englishData.reply);
+
+  const empty = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [] }),
+  });
+  check("empty messages 400", empty.status === 400, empty.status);
+
+  const badJson = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{not json",
+  });
+  check("bad json 400", badJson.status === 400, badJson.status);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
