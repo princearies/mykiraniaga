@@ -115,6 +115,21 @@ Footer semua halaman dan `/contact` (4 bahasa) menyenaraikan
 - Formatting guna `Intl.NumberFormat` (locale ikut bahasa/mata wang); JS klien memformat
   semula `[data-money]` dalam panel produk chat bila kadar berubah.
 
+## Tool intelligence & visual guardrail
+
+- Prompt Gemini (chat + search intent) mengarahkan **unit lengkap** untuk alat bermotor:
+  `cordless chainsaw`, `battery chainsaw`, `electric drill` — bukan rantai, blade, bit,
+  charger, guide plate, sprocket, kit atau aksesori. Qualifier pengguna
+  (cordless/battery/electric) dikekalkan dalam keyword.
+- Query supplier: `chainsaw → electric chainsaw`, `drill → electric drill`,
+  `grinder → angle grinder`, `trimmer/blower → electric …`.
+- Tapisan kategori (harga minimum + blacklist tajuk) untuk chainsaw (≥ RM120),
+  drill (≥ RM80) dan trimmer/blower (≥ RM80).
+- URL gambar divalidasi (`validImageUrl`): hanya `https://` daripada CDN dikenali
+  (cjdropshipping, aliexpress-media, alicdn) atau laluan berimej. Item bergambar
+  diberi keutamaan dalam ranking chat.
+- Chat memaparkan **maksimum 6** produk (mobil) — `MAX_CHAT_PRODUCTS`.
+
 ## Multi-bahasa
 
 Bahasa: **ms · en · id · zh** (`?lang=`, cookie `mkn_lang` 30 hari, dropdown header).

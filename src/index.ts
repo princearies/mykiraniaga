@@ -822,6 +822,8 @@ function intentPrompt(query: string): string {
     "- Accept Malay money phrases: bawah RM50, bajet 30, maksimum 80, kurang dari 100.",
     "- If no budget is mentioned, max_price_myr must be null. Never invent a budget.",
     "- Remove filler: cari, tolong, saya nak, for, under, below, murah.",
+    "- For motorized tools (chainsaw, drill, grinder, saw, trimmer, blower) return a complete standalone unit with its power type: 'cordless chainsaw', 'electric drill'. Never return parts (chain, blade, bit, charger, battery only, guide plate, sprocket, kit, accessory).",
+    "- Keep power qualifiers the user used (cordless, battery, electric).",
     "",
     'Examples:',
     '- "cari mini projector bawah RM80" -> {"keyword":"mini projector","max_price_myr":80}',
@@ -1092,11 +1094,32 @@ function parseCjPrice(raw: string): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|avif)(\?|#|$)/i;
+const IMAGE_HOSTS =
+  /(^|\.)(cjdropshipping\.com|aliexpress-media\.com|alicdn\.com|aliexpress\.com)$/i;
+
+/** Strict visual guardrail: only absolute https image URLs from known CDNs. */
+function validImageUrl(raw: string): string | null {
+  let value = raw.trim();
+  if (!value) return null;
+  if (value.startsWith("//")) value = `https:${value}`;
+  if (!/^https:\/\//i.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return null;
+    if (!IMAGE_HOSTS.test(url.hostname) && !IMAGE_EXT.test(url.pathname)) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function cjImage(raw: string): string | null {
   if (!raw) return null;
-  if (raw.startsWith("//")) return `https:${raw}`;
-  if (raw.startsWith("http")) return raw;
-  return null;
+  if (raw.startsWith("//")) return validImageUrl(`https:${raw}`);
+  return validImageUrl(raw);
 }
 
 /**
@@ -1375,8 +1398,7 @@ async function searchAliExpressGateway(
       const price = num(pick(row, ["price", "salePrice", "target_sale_price"]));
       if (!title || price === null || price <= 0) continue;
 
-      let image = str(pick(row, ["image", "itemMainPic"])) || null;
-      if (image && image.startsWith("//")) image = `https:${image}`;
+      const image = validImageUrl(str(pick(row, ["image", "itemMainPic"])));
 
       let productUrl = str(pick(row, ["itemUrl", "product_detail_url"]));
       if (productUrl.startsWith("//")) productUrl = `https:${productUrl}`;
@@ -1547,8 +1569,9 @@ async function searchAliExpress(
         price_myr: itemPrice,
         total_myr: round2(itemPrice + shipping.cost_myr),
         shipping,
-        image:
-          str(pick(row, ["product_main_image_url", "image_url"])) || null,
+        image: validImageUrl(
+          str(pick(row, ["product_main_image_url", "image_url"])),
+        ),
         url:
           str(pick(row, ["promotion_link", "product_detail_url"])) ||
           `https://www.aliexpress.com/item/${encodeURIComponent(id)}.html`,
@@ -1647,13 +1670,19 @@ const CATEGORY_RULES: CategoryRule[] = [
     test: /\b(chainsaw|chain saw)\b/i,
     min_total_myr: 120,
     exclude:
-      /\b(chain|chains|blade|blades|sharpening|sharpener|bit|bits|guide|plate|bar|bars|file|files|oil|helmet|glove|gloves|bag|case|cover|sprocket|rim|tension|accessor|accessories|part|parts|repair|kit|manga|figure|poster|toy|sticker)\b/i,
+      /\b(chain|chains|blade|blades|sharpening|sharpener|bit|bits|guide|plate|bar|bars|file|files|oil|helmet|glove|gloves|bag|case|cover|sprocket|rim|tension|accessor|accessories|part|parts|repair|replacement|spare|kit|motor|rotor|stator|switch|brush|manga|figure|poster|toy|sticker)\b/i,
   },
   {
     test: /\b(drill|driver)\b/i,
     min_total_myr: 80,
     exclude:
-      /\b(bit|bits|chuck|charger|battery only|case|bag|stand|holder|accessor|accessories)\b/i,
+      /\b(bit|bits|chuck|charger|battery only|case|bag|stand|holder|accessor|accessories|replacement|spare)\b/i,
+  },
+  {
+    test: /\b(trimmer|blower)\b/i,
+    min_total_myr: 80,
+    exclude:
+      /\b(line|spool|head|blade|charger|battery only|replacement|spare|part|parts|accessor|accessories)\b/i,
   },
 ];
 
@@ -1784,6 +1813,7 @@ interface ChatResult {
 }
 
 const CHAT_MAX_TURNS = 12;
+const MAX_CHAT_PRODUCTS = 6;
 
 /** Attribute tokens that must never leak into the API search string. */
 const SPEC_TOKENS = [
@@ -1866,6 +1896,8 @@ const SUPPLIER_QUERY: Record<string, string> = {
   "chain saw": "electric chainsaw",
   drill: "electric drill",
   grinder: "angle grinder",
+  trimmer: "electric trimmer",
+  blower: "electric blower",
 };
 
 function supplierQuery(keyword: string): string {
@@ -1912,13 +1944,14 @@ function stripFilters(keyword: string, filters: string[]): string {
 
 /** Soft re-rank: products whose title matches requested specs float to the top. */
 function rankByFilters(items: PricedProduct[], filters: string[]): PricedProduct[] {
-  if (!filters.length) return items;
   const score = (item: PricedProduct): number => {
     const title = item.title.toLowerCase();
-    return filters.reduce(
+    const filterScore = filters.reduce(
       (total, filter) => total + (title.includes(filter) ? 1 : 0),
       0,
     );
+    // Visual guardrail: items with a validated image rank above image-less rows.
+    return filterScore + (item.image ? 0.5 : 0);
   };
   return [...items].sort((a, b) => score(b) - score(a));
 }
@@ -1986,6 +2019,8 @@ function chatSystemPrompt(
       lang === "zh" ? "Chinese" : lang === "id" ? "Indonesian" : lang === "en" ? "English" : "Malay"
     }). Never mix languages.`,
     "- keyword: the MAIN PRODUCT NOUN only (2-4 words, English): 'gaming laptop', 'wireless earbuds'. Keep the previous keyword when the user only adds a spec or a budget. Never include brands, specs, attributes, budget words, currency or numbers.",
+    "- Tool rule: for motorized tools (chainsaw, drill, grinder, saw, trimmer, blower) the keyword MUST name a complete standalone unit with its power type — 'cordless chainsaw', 'battery chainsaw', 'electric drill'. NEVER use parts (chain, blade, bit, charger, battery only, guide plate, sprocket, kit, accessory) as the keyword.",
+    "- If the user says cordless, battery or electric, keep that qualifier in the keyword so the supplier returns full units, not replacement parts.",
     "- filters: specs/attributes the user wants (brand, GPU, CPU, RAM, size, colour) as lowercase tokens. These are NEVER part of the search query.",
     "- max_price_myr: numeric MYR budget (convert from the user's currency when needed); null if not given.",
     "- explicit: true ONLY when the user clearly wants to see products now (cari, tunjuk, show me, recommend, senaraikan, nak beli) or asks for a concrete product to purchase.",
@@ -4470,7 +4505,10 @@ app.post("/api/chat", async (c) => {
     );
   }
 
-  const ranked = rankByFilters(search?.results ?? [], chat.filters);
+  const ranked = rankByFilters(search?.results ?? [], chat.filters).slice(
+    0,
+    MAX_CHAT_PRODUCTS,
+  );
   const products = ranked.map((product) =>
     presentProduct(product, c.env, currency, rate, lang),
   );

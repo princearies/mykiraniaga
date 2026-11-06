@@ -666,5 +666,46 @@ console.log("22) chainsaw accuracy");
   );
 }
 
+console.log("23) tool intelligence + visual guardrail");
+{
+  const cordless = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: "cordless chainsaw bawah RM500" }],
+    }),
+  });
+  const data = await cordless.json();
+  check(
+    "keeps power qualifier",
+    /cordless/i.test(String(data.intent?.keyword)),
+    String(data.intent?.keyword),
+  );
+  check("chat capped at 6", (data.products ?? []).length <= 6, (data.products ?? []).length);
+
+  const search = await req("/api/search?q=" + encodeURIComponent("cordless chainsaw"));
+  const searchData = await search.json();
+  check(
+    "images are https or null",
+    searchData.results.every((p) => p.image === null || /^https:\/\//.test(p.image)),
+    JSON.stringify(searchData.results.map((p) => p.image).slice(0, 3)),
+  );
+  check(
+    "no accessory titles",
+    searchData.results.every(
+      (p) => !/\b(sharpening|guide plate|sprocket|tension)\b/i.test(p.title),
+    ),
+  );
+
+  const drill = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "electric drill bawah RM300" }] }),
+  });
+  const drillData = await drill.json();
+  check("drill keyword", /drill/i.test(String(drillData.intent?.keyword)));
+  check("drill products <= 6", (drillData.products ?? []).length <= 6);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
