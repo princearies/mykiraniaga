@@ -485,5 +485,49 @@ console.log("17) mobile split-screen");
   check("no auto-switch on mobile", body.includes("showPill(m.count)") && body.includes("isMobile()"));
 }
 
+console.log("18) multi-currency + multi-language");
+{
+  const usd = await req("/api/search?q=earbuds&currency=USD");
+  const usdData = await usd.json();
+  check("currency echo", usdData.currency === "USD", usdData.currency);
+  check("rate returned", typeof usdData.rate === "number" && usdData.rate > 0, usdData.rate);
+  const p0 = usdData.results[0];
+  check("display_currency", p0?.display_currency === "USD", p0?.display_currency);
+  check("display_price string", typeof p0?.display_price === "string" && p0.display_price.length > 1, p0?.display_price);
+  check("display_margin string", typeof p0?.display_margin === "string");
+  check(
+    "total_display matches rate",
+    Math.abs((p0?.total_display ?? 0) - (p0?.total_myr ?? 0) * usdData.rate) < 0.05,
+  );
+
+  const bogus = await req("/api/search?q=earbuds&currency=XYZ");
+  check("invalid currency falls back MYR", (await bogus.json()).currency === "MYR");
+
+  const chatId = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      lang: "id",
+      currency: "USD",
+      messages: [{ role: "user", content: "cari earbuds" }],
+    }),
+  });
+  const chatIdData = await chatId.json();
+  check("chat lang id", chatIdData.lang === "id", chatIdData.lang);
+  check("chat currency usd", chatIdData.currency === "USD", chatIdData.currency);
+  check("chat rate", typeof chatIdData.rate === "number" && chatIdData.rate > 0);
+
+  const zhPage = await req("/?lang=zh");
+  const zhBody = await zhPage.text();
+  check("zh UI", zhBody.includes("直接问") || zhBody.includes("聊天"));
+  check("language menu 4", zhBody.includes("Bahasa Indonesia") && zhBody.includes("中文"));
+  check("currency selector", zhBody.includes('class="curselect"') && zhBody.includes('value="IDR"'));
+
+  const checkout = await req("/checkout?source=cj&id=x1&base=50&currency=USD");
+  const checkoutBody = await checkout.text();
+  check("checkout shows USD", checkoutBody.includes("$"), "no $");
+  check("checkout shows MYR equivalent", checkoutBody.includes("MYR 60.00"), "no MYR eq");
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

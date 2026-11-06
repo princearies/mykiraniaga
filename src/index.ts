@@ -62,6 +62,8 @@ export interface Env {
   PRICE_MARKUP_FLAT_MYR?: string;
   /** WhatsApp order number, digits only (default 60173735431). */
   WHATSAPP_ORDER_NUMBER?: string;
+  /** Optional KV namespace for the 12h exchange-rate cache. */
+  MYKIRA_KV?: KVNamespace;
   ENVIRONMENT?: string;
 }
 
@@ -271,6 +273,195 @@ function fxRate(env: Env): number {
   const parsed = Number(env.DEFAULT_USD_MYR);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 20) return DEFAULT_FX;
   return parsed;
+}
+
+/* ------------------------------------------------------------------ */
+/* Currency: 12h rate cache (KV or isolate memory) + Intl formatting    */
+/* ------------------------------------------------------------------ */
+
+interface RatesCache {
+  rates: Record<string, number>;
+  fetched_at: number;
+  source: string;
+}
+
+const RATE_TTL_MS = 12 * 60 * 60 * 1000;
+const RATE_KV_KEY = "currency_rates_myr";
+let memoryRates: RatesCache | null = null;
+
+function currencyFrom(raw: string | undefined): CurrencyCode {
+  const value = (raw ?? "").toUpperCase();
+  return (CURRENCIES as string[]).includes(value)
+    ? (value as CurrencyCode)
+    : "MYR";
+}
+
+async function getRates(env: Env): Promise<RatesCache> {
+  const now = Date.now();
+  if (memoryRates && now - memoryRates.fetched_at < RATE_TTL_MS) {
+    return memoryRates;
+  }
+
+  if (env.MYKIRA_KV) {
+    try {
+      const cached = (await env.MYKIRA_KV.get(
+        RATE_KV_KEY,
+        "json",
+      )) as RatesCache | null;
+      if (cached?.rates && now - cached.fetched_at < RATE_TTL_MS) {
+        memoryRates = cached;
+        return cached;
+      }
+    } catch {
+      // KV is optional — fall through to the network.
+    }
+  }
+
+  try {
+    const res = await fetch("https://open.er-api.com/v6/latest/MYR", {
+      signal: timeoutSignal(6000),
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { rates?: Record<string, number> };
+      if (data.rates) {
+        const cache: RatesCache = {
+          rates: data.rates,
+          fetched_at: now,
+          source: "open.er-api.com",
+        };
+        memoryRates = cache;
+        if (env.MYKIRA_KV) {
+          await env.MYKIRA_KV.put(RATE_KV_KEY, JSON.stringify(cache), {
+            expirationTtl: 43200,
+          });
+        }
+        return cache;
+      }
+    }
+  } catch {
+    // Offline / rate limited: use the fallback table below.
+  }
+
+  return { rates: FALLBACK_RATES, fetched_at: now, source: "fallback" };
+}
+
+function rateFor(cache: RatesCache, currency: CurrencyCode): number {
+  const rate = cache.rates[currency];
+  if (typeof rate === "number" && rate > 0) return rate;
+  return FALLBACK_RATES[currency] ?? 1;
+}
+
+/** Convert an MYR amount; returns round2 of the converted value. */
+function convertCurrency(amountMyr: number, rate: number): number {
+  return round2(amountMyr * rate);
+}
+
+function whatsappUrlFor(
+  env: Env,
+  product: PricedProduct,
+  currency: CurrencyCode,
+  rate: number,
+  lang: Lang,
+): string {
+  const total = convertCurrency(product.total_myr, rate);
+  const amount =
+    currency === "MYR"
+      ? formatMoney(total, currency, lang)
+      : `${formatMoney(total, currency, lang)} (MYR ${product.total_myr.toFixed(2)})`;
+
+  const lines =
+    lang === "en"
+      ? [
+          "I want to order:",
+          `1) ${product.title}`,
+          `ID: ${product.id}`,
+          `Source: ${product.source_label}`,
+          `Total: ${amount}`,
+        ]
+      : lang === "zh"
+        ? [
+            "我想下单：",
+            `1) ${product.title}`,
+            `编号: ${product.id}`,
+            `来源: ${product.source_label}`,
+            `合计: ${amount}`,
+          ]
+        : lang === "id"
+          ? [
+              "Saya mau pesan:",
+              `1) ${product.title}`,
+              `ID: ${product.id}`,
+              `Sumber: ${product.source_label}`,
+              `Total: ${amount}`,
+            ]
+          : [
+              "Saya nak order:",
+              `1) ${product.title}`,
+              `ID: ${product.id}`,
+              `Sumber: ${product.source_label}`,
+              `Jumlah: ${amount}`,
+            ];
+
+  return `https://wa.me/${whatsappNumber(env)}?text=${encodeURIComponent(
+    lines.join("\n"),
+  )}`;
+}
+
+/** JSON projection with display_* fields for the selected currency. */
+function presentProduct(
+  product: PricedProduct,
+  env: Env,
+  currency: CurrencyCode,
+  rate: number,
+  lang: Lang,
+) {
+  return {
+    ...product,
+    display_currency: currency,
+    display_price: formatMoney(
+      convertCurrency(product.price_myr, rate),
+      currency,
+      lang,
+    ),
+    display_total: formatMoney(
+      convertCurrency(product.total_myr, rate),
+      currency,
+      lang,
+    ),
+    display_margin: formatMoney(
+      convertCurrency(product.margin_myr, rate),
+      currency,
+      lang,
+    ),
+    price_display: convertCurrency(product.price_myr, rate),
+    total_display: convertCurrency(product.total_myr, rate),
+    ...(currency === "MYR"
+      ? {}
+      : { whatsapp_url: whatsappUrlFor(env, product, currency, rate, lang) }),
+  };
+}
+
+function formatMoney(
+  amount: number,
+  currency: CurrencyCode = "MYR",
+  lang: Lang = "ms",
+): string {
+  const locale =
+    lang === "zh"
+      ? "zh-CN"
+      : lang === "id"
+        ? "id-ID"
+        : CURRENCY_LOCALE[currency];
+  try {
+    return new Intl.NumberFormat(locale, {
+      style: "currency",
+      currency,
+      maximumFractionDigits: currency === "IDR" ? 0 : 2,
+      minimumFractionDigits: currency === "IDR" ? 0 : 2,
+    }).format(amount);
+  } catch {
+    return `${currency} ${amount.toFixed(2)}`;
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1582,16 +1773,35 @@ const CHAT_SCHEMA = {
   propertyOrdering: ["reply", "keyword", "max_price_myr", "filters", "explicit"],
 };
 
-function chatSystemPrompt(): string {
+const CHAT_PERSONA: Record<Lang, string> = {
+  ms: "Anda adalah Personal Shopper MyKiraShop yang cekap dan mesra.",
+  en: "You are MyKiraShop's efficient and friendly Personal Shopper.",
+  id: "Anda adalah Asisten Personal Shopper MyKiraShop yang ramah. Jawab dalam Bahasa Indonesia.",
+  zh: "你是MyKiraShop的高效私人购物助理。请用中文回复。",
+};
+
+function chatSystemPrompt(
+  lang: Lang,
+  currency: CurrencyCode = "MYR",
+  rate = 1,
+): string {
+  const currencyLine =
+    currency === "MYR"
+      ? "The user's currency is MYR (Malaysian Ringgit)."
+      : `The user's currency is ${currency}; 1 MYR = ${rate} ${currency}. When the user quotes a budget, convert it to MYR for max_price_myr. Reply about prices in ${currency}.`;
+
   return [
-    "You are MyKiraNiaga, a Malaysian dropshipping shopping assistant.",
-    "You keep context across turns and narrow the request down before searching.",
+    CHAT_PERSONA[lang],
+    "",
+    currencyLine,
     "",
     "Return JSON with: reply, keyword, max_price_myr, filters, explicit.",
-    "- reply: 1-2 short sentences, entirely in ONE language matching the user (Malay or English). Never mix languages.",
+    `- reply: 1-2 short sentences, entirely in ONE language (${
+      lang === "zh" ? "Chinese" : lang === "id" ? "Indonesian" : lang === "en" ? "English" : "Malay"
+    }). Never mix languages.`,
     "- keyword: the MAIN PRODUCT NOUN only (2-4 words, English): 'gaming laptop', 'wireless earbuds'. Keep the previous keyword when the user only adds a spec or a budget. Never include brands, specs, attributes, budget words, currency or numbers.",
     "- filters: specs/attributes the user wants (brand, GPU, CPU, RAM, size, colour) as lowercase tokens. These are NEVER part of the search query.",
-    "- max_price_myr: numeric MYR budget (USD x4.72); null if not given.",
+    "- max_price_myr: numeric MYR budget (convert from the user's currency when needed); null if not given.",
     "- explicit: true ONLY when the user clearly wants to see products now (cari, tunjuk, show me, recommend, senaraikan, nak beli) or asks for a concrete product to purchase.",
     "",
     "Conversation rules:",
@@ -1712,7 +1922,13 @@ function heuristicChat(messages: ChatMessage[], lang: Lang): ChatResult {
   };
 }
 
-async function chatTurn(env: Env, messages: ChatMessage[], lang: Lang): Promise<ChatResult> {
+async function chatTurn(
+  env: Env,
+  messages: ChatMessage[],
+  lang: Lang,
+  currency: CurrencyCode = "MYR",
+  rate = 1,
+): Promise<ChatResult> {
   const fallback = heuristicChat(messages, lang);
   const apiKey = env.GEMINI_API_KEY;
   if (!apiKey) {
@@ -1733,7 +1949,7 @@ async function chatTurn(env: Env, messages: ChatMessage[], lang: Lang): Promise<
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            systemInstruction: { parts: [{ text: chatSystemPrompt() }] },
+            systemInstruction: { parts: [{ text: chatSystemPrompt(lang, currency, rate) }] },
             contents,
             generationConfig: {
               temperature: 0.4,
@@ -1940,6 +2156,8 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .langmenu{position:relative}
 .langmenu summary{list-style:none;cursor:pointer;font-size:12.5px;color:#b9cbe6;background:#101d31;border:1px solid #1e2f4a;border-radius:10px;padding:7px 11px;white-space:nowrap}
 .langmenu summary::-webkit-details-marker{display:none}
+.curselect{appearance:none;background:#101d31;border:1px solid #1e2f4a;color:#b9cbe6;border-radius:10px;padding:7px 10px;font:inherit;font-size:12.5px;cursor:pointer;min-height:34px}
+.curselect:focus{outline:none;border-color:#2c6d8a}
 .langmenu[open] summary{border-color:#2c6d8a}
 .langlist{position:absolute;right:0;top:calc(100% + 6px);background:#0e1a2d;border:1px solid #1e2f4a;border-radius:11px;padding:5px;min-width:160px;z-index:20;box-shadow:0 12px 30px rgba(0,0,0,.45)}
 .langlist a{display:block;padding:7px 10px;border-radius:8px;font-size:13px;color:#c7d7ee}
@@ -2066,7 +2284,28 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 /* i18n (Bahasa Melayu default, English via top-right dropdown)        */
 /* ------------------------------------------------------------------ */
 
-type Lang = "ms" | "en";
+type Lang = "ms" | "en" | "id" | "zh";
+
+type CurrencyCode = "MYR" | "USD" | "SGD" | "IDR" | "CNY";
+
+const CURRENCIES: CurrencyCode[] = ["MYR", "USD", "SGD", "IDR", "CNY"];
+
+const CURRENCY_LOCALE: Record<CurrencyCode, string> = {
+  MYR: "ms-MY",
+  USD: "en-US",
+  SGD: "en-SG",
+  IDR: "id-ID",
+  CNY: "zh-CN",
+};
+
+/** Used only when open.er-api.com is unreachable (keeps the UI usable). */
+const FALLBACK_RATES: Record<CurrencyCode, number> = {
+  MYR: 1,
+  USD: 0.21,
+  SGD: 0.28,
+  IDR: 3450,
+  CNY: 1.52,
+};
 
 /** Windows-explorer style product view. */
 type ViewMode = "large" | "compact" | "list";
@@ -2259,16 +2498,126 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     floor_empty:
       "Every result below the category price floor (accessories) was filtered out. Try a more specific keyword, e.g. \"laptop computer\".",
   },
+  id: {
+    tagline: "pencarian dropship on-demand",
+    nav_chat: "Chat",
+    nav_search: "Cari",
+    nav_api: "API",
+    nav_status: "Status",
+    lang_name: "Bahasa Indonesia",
+    land_lede:
+      "Ketik apa yang Anda cari dalam bahasa Indonesia, Melayu, atau Inggris. Mesin memahami maksud, mencari di CJ + AliExpress, dan menyusun sesuai biaya kirim.",
+    search_placeholder: "cth: laptop murah",
+    search_btn: "Cari",
+    chat_h1: "Tanya saja — saya carikan.",
+    chat_lede:
+      "Ngobrol seperti biasa: sebut produk, lalu anggaran. Saya cari di CJ + AliExpress dan tampilkan kartu produk di panel kiri.",
+    chat_placeholder: "cth: cari laptop murah",
+    chat_send: "Kirim",
+    chat_clear: "Bersihkan chat",
+    chat_greeting: "Hai! Mau cari produk apa? Sebut jenis produk dan anggarannya.",
+    chat_suggest_1: "Cari laptop murah",
+    chat_suggest_2: "Earbuds murah",
+    chat_suggest_3: "Tas kanvas untuk kerja",
+    chat_typing: "Mencari…",
+    chat_hint: "Enter untuk kirim · Shift+Enter baris baru",
+    chat_empty: "Tidak ada produk dalam anggaran itu — coba naikkan anggaran.",
+    chat_view_products: "Lihat {n} produk ditemukan →",
+    results_products: "produk",
+    results_filtered: "disaring (anggaran)",
+    empty_title: "Tidak ada produk dalam anggaran itu",
+    empty_text: "Naikkan anggaran atau coba kata kunci lain.",
+    card_order: "Pesan",
+    card_total: "Total",
+    card_margin: "Margin",
+    card_supplier_cost: "biaya supplier",
+    card_view_on: "Lihat di",
+    card_days: "hari",
+    view_large: "Grid besar",
+    view_compact: "Grid kecil",
+    view_list: "Daftar",
+    checkout_supplier: "Harga supplier",
+    checkout_shipping: "Pengiriman",
+    checkout_margin: "Margin",
+    checkout_total: "Jumlah",
+    checkout_wa: "Konfirmasi via WhatsApp",
+    checkout_back: "Kembali ke pencarian",
+    checkout_product: "Produk",
+    status_lede:
+      "Pemeriksaan konfigurasi mesin: kunci API, margin, dan nomor WhatsApp.",
+    floor_empty:
+      "Semua hasil di bawah harga minimum kategori (aksesori) disaring. Coba kata kunci lebih spesifik.",
+  },
+  zh: {
+    tagline: "按需代发商品搜索",
+    nav_chat: "聊天",
+    nav_search: "搜索",
+    nav_api: "API",
+    nav_status: "状态",
+    lang_name: "中文",
+    land_lede:
+      "用中文、马来语或英语描述需求。引擎理解意图，同时搜索 CJ 与 AliExpress，并按真实运费排序。",
+    search_placeholder: "例如：便宜的笔记本电脑",
+    search_btn: "搜索",
+    chat_h1: "直接问 — 我来找。",
+    chat_lede:
+      "像聊天一样：先说产品，再说预算。我会搜索 CJ + AliExpress，并在左侧显示商品卡片。",
+    chat_placeholder: "例如：找便宜的笔记本电脑",
+    chat_send: "发送",
+    chat_clear: "清空聊天",
+    chat_greeting: "你好！想找什么产品？可以同时说出产品和预算。",
+    chat_suggest_1: "找便宜的笔记本电脑",
+    chat_suggest_2: "80马币以内的耳机",
+    chat_suggest_3: "上班用的帆布包",
+    chat_typing: "正在搜索…",
+    chat_hint: "Enter 发送 · Shift+Enter 换行",
+    chat_empty: "该预算内没有商品 — 试试提高预算。",
+    chat_view_products: "查看 {n} 个商品 →",
+    results_products: "个商品",
+    results_filtered: "已按预算过滤",
+    empty_title: "该预算内没有商品",
+    empty_text: "提高预算或换个关键词试试。",
+    card_order: "下单",
+    card_total: "合计",
+    card_margin: "利润",
+    card_supplier_cost: "供应商成本",
+    card_view_on: "查看",
+    card_days: "天",
+    view_large: "大网格",
+    view_compact: "小网格",
+    view_list: "列表",
+    checkout_supplier: "供应商价格",
+    checkout_shipping: "运费",
+    checkout_margin: "利润",
+    checkout_total: "合计",
+    checkout_wa: "通过 WhatsApp 确认",
+    checkout_back: "返回搜索",
+    checkout_product: "商品",
+    status_lede: "引擎配置检查：API 密钥、利润和 WhatsApp 号码。",
+    floor_empty:
+      "所有低于该类目最低价（配件）的结果已被过滤。请尝试更具体的关键词。",
+  },
 };
 
 function t(lang: Lang, key: string): string {
-  return STRINGS[lang][key] ?? STRINGS.ms[key] ?? key;
+  const chain: Lang[] =
+    lang === "zh" ? ["zh", "en", "ms"] : lang === "id" ? ["id", "ms"] : [lang, "ms"];
+  for (const candidate of chain) {
+    const value = STRINGS[candidate][key];
+    if (value) return value;
+  }
+  return key;
 }
 
 function langUrl(fullUrl: string, lang: Lang): string {
   const url = new URL(fullUrl, "https://mykiraniaga.local");
   url.searchParams.set("lang", lang);
   return `${url.pathname}${url.search}`;
+}
+
+function currencyFromUrl(fullUrl: string): CurrencyCode {
+  const url = new URL(fullUrl, "https://mykiraniaga.local");
+  return currencyFrom(url.searchParams.get("currency") ?? undefined);
 }
 
 function layout(opts: {
@@ -2302,7 +2651,7 @@ function layout(opts: {
       <a href="/api">${esc(t(lang, "nav_api"))}</a>
       <a href="/status">${esc(t(lang, "nav_status"))}</a>
       <details class="langmenu">
-        <summary>${lang === "ms" ? "BM" : "EN"} ▾</summary>
+        <summary>${lang === "ms" ? "BM" : lang === "en" ? "EN" : lang === "id" ? "ID" : "中文"} ▾</summary>
         <div class="langlist">
           <a href="${esc(langUrl(opts.currentUrl, "ms"))}" class="${
             lang === "ms" ? "active" : ""
@@ -2310,8 +2659,22 @@ function layout(opts: {
           <a href="${esc(langUrl(opts.currentUrl, "en"))}" class="${
             lang === "en" ? "active" : ""
           }">English</a>
+          <a href="${esc(langUrl(opts.currentUrl, "id"))}" class="${
+            lang === "id" ? "active" : ""
+          }">Bahasa Indonesia</a>
+          <a href="${esc(langUrl(opts.currentUrl, "zh"))}" class="${
+            lang === "zh" ? "active" : ""
+          }">中文</a>
         </div>
       </details>
+      <select class="curselect" aria-label="Currency" onchange="var u=new URL(location.href);u.searchParams.set('currency',this.value);location.href=u.toString()">
+        ${CURRENCIES.map(
+          (code) =>
+            `<option value="${code}" ${
+              currencyFromUrl(opts.currentUrl) === code ? "selected" : ""
+            }>${code}</option>`,
+        ).join("")}
+      </select>
     </nav>
   </header>
   ${opts.body}
@@ -2324,7 +2687,12 @@ function layout(opts: {
 </html>`;
 }
 
-function chatBody(env: Env, lang: Lang): string {
+function chatBody(
+  env: Env,
+  lang: Lang,
+  currency: CurrencyCode = "MYR",
+  rate = 1,
+): string {
   const suggestions = [
     t(lang, "chat_suggest_1"),
     t(lang, "chat_suggest_2"),
@@ -2357,6 +2725,9 @@ function chatBody(env: Env, lang: Lang): string {
   var KEY = "mkn_chat_v1";
   var VKEY = "mkn_chat_view";
   var LANG = ${JSON.stringify(lang)};
+  var CURRENCY = ${JSON.stringify(currency)};
+  var RATE = ${JSON.stringify(rate)};
+  var LOCALE = { MYR: "ms-MY", USD: "en-US", SGD: "en-SG", IDR: "id-ID", CNY: "zh-CN" };
   var GREETING = ${JSON.stringify(t(lang, "chat_greeting"))};
   var ERROR = ${JSON.stringify(errorText)};
   var PLACEHOLDER = ${JSON.stringify(placeholder)};
@@ -2387,6 +2758,24 @@ function chatBody(env: Env, lang: Lang): string {
     return String(value == null ? "" : value)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function formatMoneyNodes(root) {
+    var nodes = (root || document).querySelectorAll("[data-money]");
+    for (var i = 0; i < nodes.length; i++) {
+      var myr = parseFloat(nodes[i].getAttribute("data-money"));
+      if (!isFinite(myr)) continue;
+      var amount = myr * RATE;
+      try {
+        nodes[i].textContent = new Intl.NumberFormat(LOCALE[CURRENCY] || "en-US", {
+          style: "currency",
+          currency: CURRENCY,
+          maximumFractionDigits: CURRENCY === "IDR" ? 0 : 2,
+          minimumFractionDigits: CURRENCY === "IDR" ? 0 : 2,
+        }).format(amount);
+      } catch (e) {
+        nodes[i].textContent = CURRENCY + " " + amount.toFixed(2);
+      }
+    }
   }
   function money(value) { return "RM " + Number(value || 0).toFixed(2); }
   function fallbackCards(products) {
@@ -2468,6 +2857,7 @@ function chatBody(env: Env, lang: Lang): string {
 
     results.innerHTML = html;
     applyView(view, false);
+    formatMoneyNodes(results);
 
     var m = data.metrics || { count: 0, timing_ms: 0, filters: [] };
     var bits = [m.count + " " + LABEL_PRODUCTS];
@@ -2496,10 +2886,12 @@ function chatBody(env: Env, lang: Lang): string {
       var res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history, lang: LANG }),
+        body: JSON.stringify({ messages: history, lang: LANG, currency: CURRENCY }),
       });
       var data = await res.json();
       stopTyping(); // spinner gone the moment the response lands
+      if (data.currency) CURRENCY = data.currency;
+      if (data.rate) RATE = Number(data.rate) || RATE;
       if (!data.ok) throw new Error(data.message || data.error || "error");
       push("assistant", data.reply);
       renderProducts(data);
@@ -2566,6 +2958,7 @@ function chatBody(env: Env, lang: Lang): string {
   stopTyping();
   applyView(view, false);
   render();
+  formatMoneyNodes(document);
 
 })();
 `;
@@ -2693,13 +3086,22 @@ function intentChips(payload: SearchPayload, lang: Lang): string {
   return `<div class="chips">${chips.join("")}</div>`;
 }
 
-function productCard(product: PricedProduct, lang: Lang): string {
+function productCard(
+  product: PricedProduct,
+  lang: Lang,
+  currency: CurrencyCode = "MYR",
+  rate = 1,
+): string {
   const thumb = product.image
     ? `<img src="${esc(product.image)}" alt="${esc(product.title)}" loading="lazy" referrerpolicy="no-referrer">`
     : `<span class="tile">${esc(SOURCE_META[product.source].short)}</span>`;
 
   const rating =
     product.rating === null ? "" : ` · ★ ${product.rating.toFixed(1)}`;
+  const fmt = (myr: number): string =>
+    formatMoney(convertCurrency(myr, rate), currency, lang);
+  const moneyAttr = (myr: number): string =>
+    `data-money="${myr.toFixed(2)}"`;
 
   return `<article class="card">
   <div class="thumb">${thumb}</div>
@@ -2708,19 +3110,23 @@ function productCard(product: PricedProduct, lang: Lang): string {
       product.demo ? ` · ${esc(t(lang, "card_demo"))}` : ""
     }</span>
     <h3 class="title">${esc(product.title)}</h3>
-    <div class="price">${money(product.price_myr)}</div>
+    <div class="price" ${moneyAttr(product.price_myr)}>${fmt(product.price_myr)}</div>
     <div class="ship">${esc(product.shipping.method)} · ${product.shipping.days_min}–${
       product.shipping.days_max
-    } ${esc(t(lang, "card_days"))} · ${money(product.shipping.cost_myr)}${rating}</div>
-    <div class="margin">${esc(t(lang, "card_margin"))} <b>${money(
+    } ${esc(t(lang, "card_days"))} · <span ${moneyAttr(
+      product.shipping.cost_myr,
+    )}>${fmt(product.shipping.cost_myr)}</span>${rating}</div>
+    <div class="margin">${esc(t(lang, "card_margin"))} <b ${moneyAttr(
       product.margin_myr,
-    )}</b> · ${esc(t(lang, "card_supplier_cost"))} ${money(
+    )}>${fmt(product.margin_myr)}</b> · ${esc(
+      t(lang, "card_supplier_cost"),
+    )} <span ${moneyAttr(product.supplier_total_myr)}>${fmt(
       product.supplier_total_myr,
-    )}</div>
+    )}</span></div>
     <div class="foot">
-      <span class="total">${esc(t(lang, "card_total"))} <b>${money(
+      <span class="total">${esc(t(lang, "card_total"))} <b ${moneyAttr(
         product.total_myr,
-      )}</b></span>
+      )}>${fmt(product.total_myr)}</b></span>
       <a class="cta cta-buy" href="${esc(product.checkout_url)}">${esc(
         t(lang, "card_order"),
       )} →</a>
@@ -2854,8 +3260,16 @@ const VIEW_SCRIPT = `
 })();
 `;
 
-function resultsBody(payload: SearchPayload, lang: Lang, view: ViewMode): string {
-  const cards = payload.results.map((product) => productCard(product, lang)).join("\n");
+function resultsBody(
+  payload: SearchPayload,
+  lang: Lang,
+  view: ViewMode,
+  currency: CurrencyCode = "MYR",
+  rate = 1,
+): string {
+  const cards = payload.results
+    .map((product) => productCard(product, lang, currency, rate))
+    .join("\n");
   const hasResults = payload.results.length > 0;
 
   // Pure search page: search box, view switcher, product cards. Nothing else.
@@ -2906,6 +3320,11 @@ interface CheckoutOrder {
   markup_pct: number;
   flat_myr: number;
   whatsapp_url: string;
+  display_currency?: CurrencyCode;
+  display_supplier?: string;
+  display_shipping?: string;
+  display_margin?: string;
+  display_total?: string;
 }
 
 function checkoutBody(order: CheckoutOrder, query: string, lang: Lang): string {
@@ -2913,21 +3332,25 @@ function checkoutBody(order: CheckoutOrder, query: string, lang: Lang): string {
   const marginLabel = `${order.markup_pct}%${
     order.flat_myr ? ` + ${money(order.flat_myr)}` : ""
   }`;
+  const supplier = order.display_supplier ?? money(order.supplier_price_myr);
+  const shipping = order.display_shipping ?? money(order.shipping_myr);
+  const margin = order.display_margin ?? money(order.margin_myr);
+  const total = order.display_total ?? money(order.total_myr);
 
   return `<div class="checkout"><div class="box">
   <h1>${esc(order.title)}</h1>
   <div class="oid">ID ${esc(order.id)} · ${esc(order.source_label)}</div>
-  <div class="crow"><span>${esc(t(lang, "checkout_supplier"))}</span><span>${money(
-    order.supplier_price_myr,
+  <div class="crow"><span>${esc(t(lang, "checkout_supplier"))}</span><span>${esc(
+    supplier,
   )}</span></div>
   <div class="crow"><span>${esc(t(lang, "checkout_shipping"))} (${esc(
     order.shipping_method,
-  )})</span><span>${money(order.shipping_myr)}</span></div>
+  )})</span><span>${esc(shipping)}</span></div>
   <div class="crow"><span>${esc(t(lang, "checkout_margin"))} ${esc(
     marginLabel,
-  )}</span><span>${money(order.margin_myr)}</span></div>
-  <div class="crow total"><span>${esc(t(lang, "checkout_total"))}</span><span>${money(
-    order.total_myr,
+  )}</span><span>${esc(margin)}</span></div>
+  <div class="crow total"><span>${esc(t(lang, "checkout_total"))}</span><span>${esc(
+    total,
   )}</span></div>
   <a class="wa-btn" href="${esc(
     order.whatsapp_url,
@@ -2956,8 +3379,11 @@ function cookieValue(c: Context, name: string): string {
 
 function langFrom(c: Context): Lang {
   const requested = (c.req.query("lang") ?? "").toLowerCase();
-  if (requested === "ms" || requested === "en") return requested;
-  return cookieValue(c, "mkn_lang").toLowerCase() === "en" ? "en" : "ms";
+  if (requested === "ms" || requested === "en" || requested === "id" || requested === "zh") {
+    return requested;
+  }
+  const cookie = cookieValue(c, "mkn_lang").toLowerCase();
+  return cookie === "en" || cookie === "id" || cookie === "zh" ? cookie : "ms";
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -2965,7 +3391,7 @@ const app = new Hono<{ Bindings: Env }>();
 app.use("*", async (c, next) => {
   const requested = (c.req.query("lang") ?? "").toLowerCase();
   await next();
-  if (requested === "ms" || requested === "en") {
+  if (requested === "ms" || requested === "en" || requested === "id" || requested === "zh") {
     c.header(
       "Set-Cookie",
       `mkn_lang=${requested}; Path=/; Max-Age=2592000; SameSite=Lax`,
@@ -2978,7 +3404,7 @@ app.use("*", async (c, next) => {
 
 app.use("/api/*", cors({ origin: "*", allowMethods: ["GET", "OPTIONS"], maxAge: 86400 }));
 
-app.get("/", (c) => {
+app.get("/", async (c) => {
   const lang = langFrom(c);
 
   if (wantsJson(c)) {
@@ -2993,7 +3419,7 @@ app.get("/", (c) => {
         "POST /api/chat": "multi-turn chat (JSON): {messages:[{role,content}], lang}",
         "GET /search?q=": "classic results (HTML/JSON negotiated)",
         "GET /api/search?q=": "search (JSON only)",
-        "GET /checkout?source=&id=&base=": "order summary + WhatsApp handoff",
+        "GET /checkout?source=&id=&base=&currency=": "order summary + WhatsApp handoff (converted)",
         "GET /status": "system status page (HTML) · JSON with ?format=json",
         "GET /health": "health probe + key status",
       },
@@ -3012,14 +3438,22 @@ app.get("/", (c) => {
           ? "MyKiraNiaga — shopping chat"
           : "MyKiraNiaga — chat beli-belah",
       description: t(lang, "chat_lede"),
-      body: chatBody(c.env, lang),
+      body: chatBody(
+        c.env,
+        lang,
+        currencyFrom(c.req.query("currency")),
+        rateFor(
+          await getRates(c.env),
+          currencyFrom(c.req.query("currency")),
+        ),
+      ),
       lang,
       currentUrl: c.req.url,
     }),
   );
 });
 
-app.get("/chat", (c) => {
+app.get("/chat", async (c) => {
   if (wantsJson(c)) {
     return c.json({
       ok: true,
@@ -3037,7 +3471,15 @@ app.get("/chat", (c) => {
           ? "MyKiraNiaga — shopping chat"
           : "MyKiraNiaga — chat beli-belah",
       description: t(lang, "chat_lede"),
-      body: chatBody(c.env, lang),
+      body: chatBody(
+        c.env,
+        lang,
+        currencyFrom(c.req.query("currency")),
+        rateFor(
+          await getRates(c.env),
+          currencyFrom(c.req.query("currency")),
+        ),
+      ),
       lang,
       currentUrl: c.req.url,
     }),
@@ -3095,11 +3537,19 @@ app.post("/api/chat", async (c) => {
     );
   }
 
-  const lang: Lang = row.lang === "en" ? "en" : "ms";
+  const requestedLang = str(row.lang || c.req.query("lang")).toLowerCase();
+  const lang: Lang =
+    requestedLang === "en" || requestedLang === "id" || requestedLang === "zh"
+      ? requestedLang
+      : "ms";
+  const currency = currencyFrom(
+    str(row.currency || c.req.query("currency")) || undefined,
+  );
+  const rate = rateFor(await getRates(c.env), currency);
   const lastUser =
     [...messages].reverse().find((message) => message.role === "user")?.content ?? "";
 
-  const chat = await chatTurn(c.env, messages, lang);
+  const chat = await chatTurn(c.env, messages, lang, currency, rate);
 
   let search: SearchPayload | null = null;
   if (chat.ready && chat.keyword) {
@@ -3119,8 +3569,13 @@ app.post("/api/chat", async (c) => {
     );
   }
 
-  const products = rankByFilters(search?.results ?? [], chat.filters);
-  const cards = products.map((product) => productCard(product, lang)).join("\n");
+  const ranked = rankByFilters(search?.results ?? [], chat.filters);
+  const products = ranked.map((product) =>
+    presentProduct(product, c.env, currency, rate, lang),
+  );
+  const cards = ranked
+    .map((product) => productCard(product, lang, currency, rate))
+    .join("\n");
   const productsHtml = products.length ? `<div class="grid">${cards}</div>` : "";
 
   let reply = chat.reply;
@@ -3171,6 +3626,8 @@ app.post("/api/chat", async (c) => {
           floor: search.meta.floor,
         }
       : null,
+    currency,
+    rate,
     products,
     products_html: productsHtml,
     metrics: {
@@ -3242,14 +3699,20 @@ app.get("/search", async (c) => {
     layout({
       title: `${payload.intent.keyword} — MyKiraNiaga`,
       description,
-      body: resultsBody(payload, lang, viewFrom(c.req.query("view"))),
+      body: resultsBody(
+        payload,
+        lang,
+        viewFrom(c.req.query("view")),
+        currencyFrom(c.req.query("currency")),
+        rateFor(await getRates(c.env), currencyFrom(c.req.query("currency"))),
+      ),
       lang,
       currentUrl: c.req.url,
     }),
   );
 });
 
-app.get("/checkout", (c) => {
+app.get("/checkout", async (c) => {
   const lang = langFrom(c);
   const source = (c.req.query("source") ?? "").toLowerCase();
   const id = (c.req.query("id") ?? "").trim().slice(0, 140);
@@ -3285,6 +3748,15 @@ app.get("/checkout", (c) => {
     `${t(lang, "checkout_product")} ${id}`;
   const label = SOURCE_META[sourceId].label;
 
+  const currency = currencyFrom(c.req.query("currency"));
+  const rate = rateFor(await getRates(c.env), currency);
+  const display = (myr: number): string =>
+    formatMoney(convertCurrency(myr, rate), currency, lang);
+  const totalText =
+    currency === "MYR"
+      ? display(margin.total)
+      : `${display(margin.total)} (MYR ${margin.total.toFixed(2)})`;
+
   const waText =
     lang === "en"
       ? [
@@ -3292,15 +3764,31 @@ app.get("/checkout", (c) => {
           `1) ${title}`,
           `ID: ${id}`,
           `Source: ${label}`,
-          `Total: ${money(margin.total)} (incl. shipping)`,
+          `Total: ${totalText} (incl. shipping)`,
         ].join("\n")
-      : [
-          "Saya nak order:",
-          `1) ${title}`,
-          `ID: ${id}`,
-          `Sumber: ${label}`,
-          `Jumlah: ${money(margin.total)} (termasuk pos)`,
-        ].join("\n");
+      : lang === "zh"
+        ? [
+            "我想下单：",
+            `1) ${title}`,
+            `编号: ${id}`,
+            `来源: ${label}`,
+            `合计: ${totalText}`,
+          ].join("\n")
+        : lang === "id"
+          ? [
+              "Saya mau pesan:",
+              `1) ${title}`,
+              `ID: ${id}`,
+              `Sumber: ${label}`,
+              `Total: ${totalText}`,
+            ].join("\n")
+          : [
+              "Saya nak order:",
+              `1) ${title}`,
+              `ID: ${id}`,
+              `Sumber: ${label}`,
+              `Jumlah: ${totalText} (termasuk pos)`,
+            ].join("\n");
 
   const order: CheckoutOrder = {
     id,
@@ -3318,6 +3806,14 @@ app.get("/checkout", (c) => {
     whatsapp_url: `https://wa.me/${whatsappNumber(c.env)}?text=${encodeURIComponent(
       waText,
     )}`,
+    display_currency: currency,
+    display_supplier: display(margin.supplier_price),
+    display_shipping: display(shipping.cost_myr),
+    display_margin: display(margin.margin),
+    display_total:
+      currency === "MYR"
+        ? display(margin.total)
+        : `${display(margin.total)} (MYR ${margin.total.toFixed(2)})`,
   };
 
   c.header("Cache-Control", "no-store");
@@ -3352,8 +3848,21 @@ app.get("/api/search", async (c) => {
 
   const limit = Number(c.req.query("limit") ?? "24");
   const payload = await runSearch(c.env, rawQuery, Number.isFinite(limit) ? limit : 24);
+
+  const lang = langFrom(c);
+  const currency = currencyFrom(c.req.query("currency"));
+  const rate = rateFor(await getRates(c.env), currency);
+  const results = payload.results.map((product) =>
+    presentProduct(product, c.env, currency, rate, lang),
+  );
+
   c.header("Cache-Control", "public, max-age=60");
-  return c.json(payload);
+  return c.json({
+    ...payload,
+    currency,
+    rate,
+    results,
+  });
 });
 
 app.get("/api", (c) =>
@@ -3371,7 +3880,8 @@ app.get("/api", (c) =>
     params: {
       q: "query string, 2-200 chars",
       format: "json | html (optional)",
-      lang: "ms | en (optional, default ms)",
+      lang: "ms | en | id | zh (optional, default ms)",
+      currency: "MYR | USD | SGD | IDR | CNY (optional, default MYR)",
       limit: `1-${MAX_RESULTS} (default 24)`,
     },
     response_fields: {

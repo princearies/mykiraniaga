@@ -52,6 +52,37 @@ Pilihan disimpan dalam `localStorage` (`mkn_view`), dicermin ke URL melalui
 (contoh: `/search?q=laptop&view=list`). Tanpa JavaScript, butang masih berfungsi melalui
 muat semula dengan `?view=`.
 
+## Multi-mata wang
+
+- Kadar dari `https://open.er-api.com/v6/latest/MYR`, cache **12 jam** dalam memori isolate
+  (dan KV `MYKIRA_KV` jika binding dipasang, kunci `currency_rates_myr`, TTL 43200s).
+  Jika API gagal, jadual fallback digunakan supaya UI tetap berfungsi.
+- Sokongan: **MYR, USD, SGD, IDR, CNY** (`?currency=` pada semua halaman; dropdown di header).
+- `/api/search` tambah `display_currency`, `display_price`, `display_total`, `display_margin`
+  (string berformat) + `price_display`/`total_display` (nombor) + `currency`/`rate` di root.
+- `whatsapp_url` dan halaman `/checkout` menggunakan jumlah tertukar dengan format
+  `USD 2.01 (MYR 8.14)`.
+- Formatting guna `Intl.NumberFormat` (locale ikut bahasa/mata wang); JS klien memformat
+  semula `[data-money]` dalam panel produk chat bila kadar berubah.
+
+## Multi-bahasa
+
+Bahasa: **ms · en · id · zh** (`?lang=`, cookie `mkn_lang` 30 hari, dropdown header).
+UI diterjemah untuk ms/en sepenuhnya; id/zh meliputi rentetan utama (nav, chat, kad,
+checkout, status) dengan fallback ke en/ms.
+
+Prompt Gemini bertukar persona mengikut bahasa:
+
+| Lang | Persona |
+|---|---|
+| ms | “Anda adalah Personal Shopper MyKiraShop yang cekap dan mesra.” |
+| en | “You are MyKiraShop's efficient and friendly Personal Shopper.” |
+| id | “Anda adalah Asisten Personal Shopper MyKiraShop yang ramah…” |
+| zh | “你是MyKiraShop的高效私人购物助理…” |
+
+Prompt juga menyatakan mata wang pengguna + kadar (1 MYR = X) supaya bajet ditukar ke MYR
+untuk `max_price_myr`.
+
 ## Chat percakapan (split screen)
 
 `/` dan `/chat` guna susun atur dua panel:
