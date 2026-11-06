@@ -328,7 +328,7 @@ console.log("12) view switcher modes");
   });
   const chatData = await chat.json();
   check("chat inline cards", chatData.products_html.includes('class="card"'));
-  check("chat meta line", chatData.products_html.includes('class="chatmeta"'));
+  check("chat metrics", (chatData.metrics?.count ?? -1) === (chatData.products ?? []).length);
 }
 
 console.log("13) chat gating: query vs filters");
@@ -426,6 +426,44 @@ console.log("14) category floor");
     "chat floor rule applied",
     chatData.search?.floor?.min_total_myr === 300,
     JSON.stringify(chatData.search?.floor),
+  );
+}
+
+console.log("15) split-screen chat layout");
+{
+  const page = await req("/");
+  const body = await page.text();
+  check("split container", body.includes('class="split"'));
+  check("results pane", body.includes('id="resultspane"'));
+  check("chat pane", body.includes('id="chatpane"'));
+  check("results area", body.includes('id="chatresults"'));
+  check("metrics line", body.includes('id="chatmetrics"'));
+  check("view toggles", (body.match(/data-cview=/g) ?? []).length === 3);
+  check("mobile tabs", body.includes('class="mobiletabs"') && body.includes('data-tab="results"'));
+  check("placeholder", body.includes("results-placeholder"));
+  check("no status on chat", !body.includes("Status sistem"));
+
+  const chat = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", content: "tunjuk laptop" }] }),
+  });
+  const data = await chat.json();
+  check("products html is grid only", data.products_html.startsWith('<div class="grid">'));
+  check("metrics count", data.metrics?.count === data.products.length, JSON.stringify(data.metrics));
+  check("metrics filters array", Array.isArray(data.metrics?.filters));
+}
+
+console.log("16) supplier query normalisation");
+{
+  const laptop = await req("/api/search?q=laptop");
+  const data = await laptop.json();
+  check("keyword stays base noun", data.intent?.keyword === "laptop", String(data.intent?.keyword));
+  check("laptop results exist", data.results.length > 0, data.results.length);
+  check(
+    "floor keeps real laptops",
+    data.results.every((p) => p.total_myr >= 300),
+    JSON.stringify(data.results.map((p) => p.total_myr)),
   );
 }
 

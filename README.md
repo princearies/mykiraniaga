@@ -52,7 +52,18 @@ Pilihan disimpan dalam `localStorage` (`mkn_view`), dicermin ke URL melalui
 (contoh: `/search?q=laptop&view=list`). Tanpa JavaScript, butang masih berfungsi melalui
 muat semula dengan `?view=`.
 
-## Chat percakapan
+## Chat percakapan (split screen)
+
+`/` dan `/chat` guna susun atur dua panel:
+
+- **Kiri (65–68%)** — hasil produk: pemilih paparan (▦ ▥ ☰), bar metrik
+  (`6 produk · 2921 ms · nvidia`), dan grid kad. Kad **tidak** lagi disuntik ke dalam bubble.
+- **Kanan (~32%)** — panel chat: bubble sejarah, input, hantar, chip cadangan, kosongkan chat.
+  Panel ini `position:sticky` dan scroll dalamannya sendiri.
+
+Pada skrin ≤900px, panel jadi satu kolum dan tab **Chat | Hasil** muncul (tab Hasil dapat
+badge bilangan produk). Bila hasil tiba, tab Hasil diaktifkan automatik pada telefon.
+Spinner “Sedang mencari…” dipadam serta-merta selepas respons tiba, sebelum kad dirender.
 
 `GET /` sekarang buka chat. Sejarah disimpan dalam `sessionStorage` pelayar dan dihantar
 semula setiap turn — worker kekal stateless.
@@ -80,7 +91,8 @@ Respons:
   "intent": {"keyword":"laptop","max_price_myr":1500,"ready":true,"engine":"gemini"},
   "search": {"count":6,"removed":0,"timing_ms":5300,"sources":[...]},
   "products": [ ... ],
-  "products_html": "<div class=\"grid\">...</div>"
+  "products_html": "<div class=\"grid\">...</div>",
+  "metrics": { "count": 6, "timing_ms": 2921, "filters": ["nvidia"], "removed": 32 }
 }
 ```
 
@@ -113,6 +125,23 @@ Bot  : Mencari laptop … (filters: nvidia, ryzen 7)         (ready=true)
   sebagai konteks dan dipakai untuk susun atur hasil (padanan naik ke atas),
   **tidak** dihantar ke API CJ/AliExpress.
 - Perkataan chatter (“ada”, “nak”, budget, mata wang, nombor) dibuang sebelum carian.
+
+### Normalisasi query supplier
+
+Kata nama asas dinormalkan sebelum dihantar ke CJ/AliExpress supaya aksesori tidak membanjiri
+hasil (contoh: “laptop” pada CJ pulangkan stand/sleeve):
+
+| Input | Query supplier |
+|---|---|
+| laptop / notebook | `laptop computer` |
+| tablet | `tablet pc` |
+| phone | `smartphone` |
+| monitor | `computer monitor` |
+| gpu | `graphics card` |
+| camera | `digital camera` |
+
+`intent.keyword` kekal sebagai kata nama asas (untuk paparan + tapisan harga); hanya string
+API yang dinormalkan.
 
 ### Harga minimum kategori
 

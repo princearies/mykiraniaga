@@ -1331,11 +1331,12 @@ async function runSearchWithIntent(
   const config = configStatus(env);
 
   const keyword = intent.keyword || rawQuery;
+  const apiKeyword = supplierQuery(keyword);
 
   // Parallel, non-throwing adapters (supplier-level prices).
   const [cj, aliexpress] = await Promise.all([
-    searchCj(env, keyword, fx),
-    searchAliExpress(env, keyword, fx),
+    searchCj(env, apiKeyword, fx),
+    searchAliExpress(env, apiKeyword, fx),
   ]);
 
   // Single margin + checkout pass so every source obeys the same rules.
@@ -1476,6 +1477,23 @@ function baseProductNoun(keyword: string): string {
   const kept = words.filter((word) => !PRODUCT_MODIFIERS.includes(word));
   const result = (kept.length ? kept : words).join(" ").trim();
   return result || keyword;
+}
+
+/** Normalise the supplier query: a bare "laptop" returns accessories on CJ/AE. */
+const SUPPLIER_QUERY: Record<string, string> = {
+  laptop: "laptop computer",
+  notebook: "laptop computer",
+  tablet: "tablet pc",
+  phone: "smartphone",
+  smartphone: "smartphone",
+  monitor: "computer monitor",
+  gpu: "graphics card",
+  camera: "digital camera",
+};
+
+function supplierQuery(keyword: string): string {
+  const key = keyword.toLowerCase().trim();
+  return SUPPLIER_QUERY[key] ?? keyword;
 }
 
 const SEARCH_VERBS =
@@ -1960,6 +1978,30 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .grid.view-list .price{font-size:17px}
 .grid.view-list .foot{margin-top:4px}
 .chatmeta{font-size:12px;color:#8fa3c4;margin:2px 2px 8px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,32%);gap:16px;align-items:start;margin-top:10px}
+.pane{background:#0b1524;border:1px solid #1a2a42;border-radius:16px;padding:14px;min-width:0}
+.panehead{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px;flex-wrap:wrap}
+.panehead h2{margin:0;font-size:12px;letter-spacing:.8px;text-transform:uppercase;color:#8fa3c4;font-weight:700}
+.metrics{font-size:12px;color:#7c93b8;margin:0 0 10px;min-height:16px}
+.results-placeholder{border:1px dashed #24374f;border-radius:12px;padding:44px 16px;text-align:center;color:#7c93b8;font-size:13px}
+.results-pane{min-height:430px}
+.chat-pane{position:sticky;top:12px;display:flex;flex-direction:column;height:calc(100vh - 150px);max-height:780px;min-height:430px}
+.chat-pane .chatlog{flex:1;min-height:160px;max-height:none}
+.chat-pane .chatcompose{margin-top:10px}
+.chat-pane .quickchips button{font-size:12px}
+.mobiletabs{display:none;gap:6px;margin:12px 0 0}
+.mobiletabs button{flex:1;background:#0f1b2e;border:1px solid #1e2f4a;border-radius:10px;color:#9db2d3;padding:9px;font:inherit;font-size:13px;cursor:pointer}
+.mobiletabs button.active{background:#123049;color:#22d3ee;border-color:#2c6d8a}
+#resultcount{color:#22d3ee;font-weight:700}
+@media (max-width:900px){
+  .split{grid-template-columns:1fr}
+  .mobiletabs{display:flex}
+  .pane{display:none}
+  .pane.active{display:flex;flex-direction:column}
+  .chat-pane{position:static;height:auto;max-height:none;min-height:0}
+  .chat-pane .chatlog{max-height:54vh}
+  .results-pane{min-height:0}
+}
 .chatwrap{margin-top:8px}
 .chatlog{display:flex;flex-direction:column;gap:12px;background:#0b1524;border:1px solid #1a2a42;border-radius:16px;padding:18px;min-height:280px;max-height:60vh;overflow-y:auto;scroll-behavior:smooth}
 .msg{display:flex;gap:10px}
@@ -2253,6 +2295,11 @@ function chatBody(env: Env, lang: Lang): string {
   ];
   const errorText =
     lang === "en" ? "Network error — try again." : "Ralat rangkaian — cuba lagi.";
+  const placeholder =
+    lang === "en"
+      ? "Results appear here while you chat."
+      : "Hasil carian akan muncul di sini.";
+  const metricsIdle = lang === "en" ? "No results yet" : "Belum ada hasil";
 
   const script = `
 (function () {
@@ -2261,12 +2308,29 @@ function chatBody(env: Env, lang: Lang): string {
   var input = document.getElementById("chatinput");
   var typing = document.getElementById("typing");
   var sendBtn = form.querySelector("button[type=submit]");
+  var results = document.getElementById("chatresults");
+  var metrics = document.getElementById("chatmetrics");
+  var countBadge = document.getElementById("resultcount");
+  var chatPane = document.getElementById("chatpane");
+  var resultsPane = document.getElementById("resultspane");
+  var tabs = document.querySelectorAll("[data-tab]");
+  var viewButtons = document.querySelectorAll("[data-cview]");
+
   var KEY = "mkn_chat_v1";
+  var VKEY = "mkn_chat_view";
   var LANG = ${JSON.stringify(lang)};
   var GREETING = ${JSON.stringify(t(lang, "chat_greeting"))};
   var ERROR = ${JSON.stringify(errorText)};
+  var PLACEHOLDER = ${JSON.stringify(placeholder)};
+  var METRICS_IDLE = ${JSON.stringify(metricsIdle)};
+  var LABEL_PRODUCTS = ${JSON.stringify(t(lang, "results_products"))};
+
   var history = [];
   try { history = JSON.parse(sessionStorage.getItem(KEY) || "[]") || []; } catch (e) { history = []; }
+
+  var view = "large";
+  try { view = localStorage.getItem(VKEY) || "large"; } catch (e) {}
+  if (["large", "compact", "list"].indexOf(view) < 0) view = "large";
 
   function save() { try { sessionStorage.setItem(KEY, JSON.stringify(history.slice(-40))); } catch (e) {} }
   function scroll() { log.scrollTop = log.scrollHeight; }
@@ -2297,14 +2361,52 @@ function chatBody(env: Env, lang: Lang): string {
     scroll();
   }
 
+  function applyView(next, persist) {
+    view = next;
+    var grid = results.querySelector(".grid");
+    if (grid) grid.className = "grid view-" + next;
+    for (var i = 0; i < viewButtons.length; i++) {
+      var on = viewButtons[i].getAttribute("data-cview") === next;
+      viewButtons[i].classList.toggle("active", on);
+      viewButtons[i].setAttribute("aria-pressed", on ? "true" : "false");
+    }
+    if (persist) { try { localStorage.setItem(VKEY, next); } catch (e) {} }
+  }
+
+  function activate(tab) {
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].classList.toggle("active", tabs[i].getAttribute("data-tab") === tab);
+    }
+    if (chatPane) chatPane.classList.toggle("active", tab === "chat");
+    if (resultsPane) resultsPane.classList.toggle("active", tab === "results");
+  }
+
+  function renderProducts(data) {
+    if (!data.products_html) return;
+    results.innerHTML = data.products_html;
+    applyView(view, false);
+
+    var m = data.metrics || { count: 0, timing_ms: 0, filters: [] };
+    var bits = [m.count + " " + LABEL_PRODUCTS];
+    if (m.timing_ms) bits.push(m.timing_ms + " ms");
+    if (m.filters && m.filters.length) bits.push(m.filters.join(", "));
+    if (m.removed) bits.push("-" + m.removed);
+    metrics.textContent = bits.join(" · ");
+    if (countBadge) countBadge.textContent = m.count ? "(" + m.count + ")" : "";
+
+    if (window.matchMedia("(max-width: 900px)").matches) activate("results");
+  }
+
   async function send(text) {
     text = (text || "").trim();
     if (!text) return;
+
     push("user", text);
     input.value = "";
     typing.hidden = false;
     sendBtn.disabled = true;
     input.disabled = true;
+
     try {
       var res = await fetch("/api/chat", {
         method: "POST",
@@ -2312,19 +2414,12 @@ function chatBody(env: Env, lang: Lang): string {
         body: JSON.stringify({ messages: history, lang: LANG }),
       });
       var data = await res.json();
+      typing.hidden = true; // stop the spinner the moment the response lands
       if (!data.ok) throw new Error(data.message || data.error || "error");
       push("assistant", data.reply);
-      if (data.products_html) {
-        var holder = document.createElement("div");
-        holder.className = "msg bot";
-        var box = document.createElement("div");
-        box.className = "bubble products";
-        box.innerHTML = data.products_html;
-        holder.appendChild(box);
-        log.appendChild(holder);
-        scroll();
-      }
+      renderProducts(data);
     } catch (err) {
+      typing.hidden = true;
       log.appendChild(bubble("assistant", "⚠ " + ERROR));
       scroll();
     } finally {
@@ -2339,46 +2434,103 @@ function chatBody(env: Env, lang: Lang): string {
   input.addEventListener("keydown", function (ev) {
     if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); send(input.value); }
   });
+
   var chips = document.querySelectorAll("[data-chip]");
   for (var c = 0; c < chips.length; c++) {
     chips[c].addEventListener("click", function () { send(this.getAttribute("data-chip")); });
   }
-  var clear = document.getElementById("chatclear");
-  if (clear) clear.addEventListener("click", function () { history = []; save(); render(); input.focus(); });
 
+  for (var v = 0; v < viewButtons.length; v++) {
+    viewButtons[v].addEventListener("click", function () {
+      applyView(this.getAttribute("data-cview"), true);
+    });
+  }
+
+  for (var t = 0; t < tabs.length; t++) {
+    tabs[t].addEventListener("click", function () {
+      activate(this.getAttribute("data-tab"));
+    });
+  }
+
+  var clear = document.getElementById("chatclear");
+  if (clear) {
+    clear.addEventListener("click", function () {
+      history = [];
+      save();
+      render();
+      results.innerHTML = '<div class="results-placeholder">' + PLACEHOLDER + "</div>";
+      metrics.textContent = METRICS_IDLE;
+      if (countBadge) countBadge.textContent = "";
+      input.focus();
+    });
+  }
+
+  applyView(view, false);
   render();
 })();
 `;
 
   return `<h1>${esc(t(lang, "chat_h1"))}</h1>
 <p class="lede">${esc(t(lang, "chat_lede"))}</p>
-<section class="chatwrap">
-  <div id="chatlog" class="chatlog" aria-live="polite"></div>
-  <div id="typing" class="typing" hidden><span class="dot"></span><span class="dot"></span><span class="dot"></span> ${esc(
-    t(lang, "chat_typing"),
-  )}</div>
-  <form id="chatform" class="chatcompose" autocomplete="off">
-    <textarea id="chatinput" rows="1" placeholder="${esc(
-      t(lang, "chat_placeholder"),
-    )}" aria-label="${esc(t(lang, "chat_placeholder"))}"></textarea>
-    <button type="submit">${esc(t(lang, "chat_send"))}</button>
-  </form>
-  <div class="chattools">
-    <span>${esc(t(lang, "chat_hint"))}</span>
-    <button type="button" id="chatclear">${esc(t(lang, "chat_clear"))}</button>
-  </div>
-  <div class="quickchips">
-    ${suggestions
-      .map(
-        (suggestion) =>
-          `<button type="button" data-chip="${esc(suggestion)}">${esc(suggestion)}</button>`,
-      )
-      .join("")}
-  </div>
-</section>
+
+<div class="mobiletabs" role="tablist">
+  <button type="button" data-tab="chat" class="active">${esc(t(lang, "nav_chat"))}</button>
+  <button type="button" data-tab="results">${esc(
+    t(lang, "results_products"),
+  )} <span id="resultcount"></span></button>
+</div>
+
+<div class="split" id="split">
+  <section class="pane results-pane" id="resultspane">
+    <div class="panehead">
+      <h2>${esc(t(lang, "results_products"))}</h2>
+      <div class="viewswitch" role="group" aria-label="${esc(
+        t(lang, "view_label"),
+      )}">
+        <button type="button" class="viewbtn active" data-cview="large" title="${esc(
+          t(lang, "view_large"),
+        )}" aria-label="${esc(t(lang, "view_large"))}">▦</button>
+        <button type="button" class="viewbtn" data-cview="compact" title="${esc(
+          t(lang, "view_compact"),
+        )}" aria-label="${esc(t(lang, "view_compact"))}">▥</button>
+        <button type="button" class="viewbtn" data-cview="list" title="${esc(
+          t(lang, "view_list"),
+        )}" aria-label="${esc(t(lang, "view_list"))}">☰</button>
+      </div>
+    </div>
+    <div class="metrics" id="chatmetrics">${esc(metricsIdle)}</div>
+    <div class="results-area" id="chatresults" aria-live="polite">
+      <div class="results-placeholder">${esc(placeholder)}</div>
+    </div>
+  </section>
+
+  <aside class="pane chat-pane active" id="chatpane">
+    <div id="chatlog" class="chatlog" aria-live="polite"></div>
+    <div id="typing" class="typing" hidden><span class="dot"></span><span class="dot"></span><span class="dot"></span> ${esc(
+      t(lang, "chat_typing"),
+    )}</div>
+    <form id="chatform" class="chatcompose" autocomplete="off">
+      <textarea id="chatinput" rows="1" placeholder="${esc(
+        t(lang, "chat_placeholder"),
+      )}" aria-label="${esc(t(lang, "chat_placeholder"))}"></textarea>
+      <button type="submit">${esc(t(lang, "chat_send"))}</button>
+    </form>
+    <div class="chattools">
+      <span>${esc(t(lang, "chat_hint"))}</span>
+      <button type="button" id="chatclear">${esc(t(lang, "chat_clear"))}</button>
+    </div>
+    <div class="quickchips">
+      ${suggestions
+        .map(
+          (suggestion) =>
+            `<button type="button" data-chip="${esc(suggestion)}">${esc(suggestion)}</button>`,
+        )
+        .join("")}
+    </div>
+  </aside>
+</div>
 <script>${script}</script>`;
 }
-
 function searchForm(
   q: string,
   autofocus: boolean,
@@ -2866,14 +3018,7 @@ app.post("/api/chat", async (c) => {
 
   const products = rankByFilters(search?.results ?? [], chat.filters);
   const cards = products.map((product) => productCard(product, lang)).join("\n");
-  const filterNote = chat.filters.length
-    ? ` · ${esc(chat.filters.join(", "))}`
-    : "";
-  const productsHtml = products.length
-    ? `<div class="chatmeta">${products.length} ${esc(
-        t(lang, "results_products"),
-      )} · ${search?.meta.timing_ms ?? 0} ms${filterNote}</div><div class="grid">${cards}</div>`
-    : "";
+  const productsHtml = products.length ? `<div class="grid">${cards}</div>` : "";
 
   let reply = chat.reply;
 
@@ -2925,6 +3070,12 @@ app.post("/api/chat", async (c) => {
       : null,
     products,
     products_html: productsHtml,
+    metrics: {
+      count: products.length,
+      timing_ms: search?.meta.timing_ms ?? 0,
+      filters: chat.filters,
+      removed: search?.meta.floor?.removed ?? 0,
+    },
   });
 });
 app.get("/search", async (c) => {
