@@ -52,6 +52,22 @@ Pilihan disimpan dalam `localStorage` (`mkn_view`), dicermin ke URL melalui
 (contoh: `/search?q=laptop&view=list`). Tanpa JavaScript, butang masih berfungsi melalui
 muat semula dengan `?view=`.
 
+## Halaman polisi
+
+| Laluan | Kandungan |
+|---|---|
+| `/privacy` | Data diproses, cookie/localStorage, pihak ketiga, hak pengguna |
+| `/terms` | Perkhidmatan, harga, tanggungjawab, perubahan terma |
+| `/shipping` | Pemprosesan 1–3 hari, penghantaran 7–18 hari bekerja (CJPacket / AliExpress Standard), tracking, duti |
+| `/refunds` | Tetingkap 14 hari, bukti unboxing, aliran ganti/bayar balik |
+| `/contact` | WhatsApp +60 17-373 5431, e-mel placeholder, waktu operasi |
+
+- Kandungan dijana mengikut `lang` (ms/en/id/zh) daripada objek `POLICY`.
+- Footer di **semua** halaman (Chat, Search, Status, polisi) ada pautan:
+  Privacy · Terms · Shipping · Refunds · Contact.
+- Setiap halaman ada pautan **← Kembali** di atas dan bawah.
+- `?format=json` memulangkan `{slug, lang, title, intro, sections}`.
+
 ## Multi-mata wang
 
 - Kadar dari `https://open.er-api.com/v6/latest/MYR`, cache **12 jam** dalam memori isolate

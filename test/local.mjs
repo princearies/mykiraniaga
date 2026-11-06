@@ -529,5 +529,50 @@ console.log("18) multi-currency + multi-language");
   check("checkout shows MYR equivalent", checkoutBody.includes("MYR 60.00"), "no MYR eq");
 }
 
+console.log("19) policy pages + footer");
+{
+  const pages = [
+    ["/privacy", "Dasar Privasi"],
+    ["/terms", "Terma Perkhidmatan"],
+    ["/shipping", "Maklumat Penghantaran"],
+    ["/refunds", "Pemulangan"],
+    ["/contact", "Hubungi Kami"],
+  ];
+  for (const [path, title] of pages) {
+    const res = await req(path);
+    const body = await res.text();
+    check(`${path} 200`, res.status === 200, res.status);
+    check(`${path} title`, body.includes(title), title);
+    check(`${path} back link`, body.includes('class="pback"'));
+    check(`${path} footer`, body.includes('class="footerlinks"'));
+  }
+
+  const shipping = await req("/shipping");
+  const shippingBody = await shipping.text();
+  check("shipping timeline", shippingBody.includes("7–18"), "no 7-18");
+  check("shipping tracking", /penjejakan|tracking/i.test(shippingBody));
+
+  const refunds = await req("/refunds");
+  check("14-day window", (await refunds.text()).includes("14 hari"));
+
+  const contact = await req("/contact");
+  check("whatsapp link", (await contact.text()).includes("wa.me/60173735431"));
+
+  const zh = await req("/privacy?lang=zh");
+  check("zh policy", (await zh.text()).includes("隐私政策"));
+
+  const id = await req("/terms?lang=id");
+  check("id policy", (await id.text()).includes("Syarat Layanan"));
+
+  const json = await req("/shipping?format=json");
+  const jsonData = await json.json();
+  check("policy json", jsonData.ok === true && Array.isArray(jsonData.sections), JSON.stringify(jsonData).slice(0, 80));
+
+  for (const path of ["/", "/search", "/status"]) {
+    const body = await (await req(path)).text();
+    check(`footer on ${path}`, body.includes('class="footerlinks"') && body.includes('href="/refunds"'));
+  }
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

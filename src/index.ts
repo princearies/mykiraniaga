@@ -2127,6 +2127,18 @@ details.api pre{overflow:auto;background:#060d18;border:1px solid #16233a;border
 .step p{margin:0;color:#93a8c8;font-size:13px}
 footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#63799b;font-size:12px;
   display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between}
+.footerlinks{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;width:100%;margin-bottom:8px}
+.footerlinks a{color:#8fa3c4}
+.footerlinks a:hover{color:#5eead4}
+.policy{max-width:760px;margin:0 auto}
+.pback{display:inline-block;font-size:13px;color:#7dd3fc;margin:4px 0 14px}
+.policy h1{font-size:clamp(24px,3.4vw,32px);margin:0 0 8px}
+.pintro{color:#9db2d3;font-size:14.5px;margin:0 0 18px}
+.policy section{margin:0 0 16px;background:#0d1829;border:1px solid #1a2a42;border-radius:13px;padding:14px 16px}
+.policy h2{font-size:15px;margin:0 0 8px;color:#e6eefc}
+.policy p{margin:0 0 8px;color:#a8bcd8;font-size:13.8px;line-height:1.62}
+.policy p:last-child{margin-bottom:0}
+.updated{color:#63799b;font-size:12px;margin:6px 0 12px}
 .err-box{background:#1a0d0d;border:1px solid #4a1d1d;border-radius:13px;padding:22px}
 .err-box h1{font-size:22px;margin:0 0 8px}
 .margin{font-size:11px;color:#8fa3c4;border-top:1px dashed #1c2b45;padding-top:7px;margin-top:2px}
@@ -2320,6 +2332,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "Status",
     lang_name: "Bahasa Melayu",
+    back_home: "Kembali",
+    policy_updated: "Dikemas kini: November 2026",
     land_h1_a: "Cari produk dropship,",
     land_h1_b: "terus ikut bajet.",
     land_lede:
@@ -2412,6 +2426,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "Status",
     lang_name: "English",
+    back_home: "Back",
+    policy_updated: "Last updated: November 2026",
     land_h1_a: "Find dropship products,",
     land_h1_b: "straight to your budget.",
     land_lede:
@@ -2505,6 +2521,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "Status",
     lang_name: "Bahasa Indonesia",
+    back_home: "Kembali",
+    policy_updated: "Terakhir diperbarui: November 2026",
     land_lede:
       "Ketik apa yang Anda cari dalam bahasa Indonesia, Melayu, atau Inggris. Mesin memahami maksud, mencari di CJ + AliExpress, dan menyusun sesuai biaya kirim.",
     search_placeholder: "cth: laptop murah",
@@ -2555,6 +2573,8 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     nav_api: "API",
     nav_status: "状态",
     lang_name: "中文",
+    back_home: "返回",
+    policy_updated: "最后更新：2026 年 11 月",
     land_lede:
       "用中文、马来语或英语描述需求。引擎理解意图，同时搜索 CJ 与 AliExpress，并按真实运费排序。",
     search_placeholder: "例如：便宜的笔记本电脑",
@@ -2679,6 +2699,11 @@ function layout(opts: {
   </header>
   ${opts.body}
   <footer>
+    <nav class="footerlinks">
+      ${POLICY_SLUGS.map(
+        (slug) => `<a href="/${slug}">${esc(POLICY[lang][slug].title)}</a>`,
+      ).join("\n      ")}
+    </nav>
     <span>MyKiraNiaga v${VERSION} · Hono + Cloudflare Workers</span>
     <span>${esc(t(lang, "footer_note"))}</span>
   </footer>
@@ -3298,6 +3323,630 @@ function resultsBody(
 ${body}`;
 }
 
+/* ------------------------------------------------------------------ */
+/* Policy pages (privacy, terms, shipping, refunds, contact)           */
+/* ------------------------------------------------------------------ */
+
+type PolicySlug = "privacy" | "terms" | "shipping" | "refunds" | "contact";
+
+interface PolicySection {
+  heading: string;
+  body: string[];
+}
+
+interface PolicyDoc {
+  title: string;
+  intro: string;
+  sections: PolicySection[];
+}
+
+const POLICY_SLUGS: PolicySlug[] = [
+  "privacy",
+  "terms",
+  "shipping",
+  "refunds",
+  "contact",
+];
+
+const POLICY: Record<Lang, Record<PolicySlug, PolicyDoc>> = {
+  ms: {
+    privacy: {
+      title: "Dasar Privasi",
+      intro:
+        "Kami menghormati privasi anda. Halaman ini menerangkan data yang diproses oleh MyKiraNiaga dan cara anda boleh mengawalnya.",
+      sections: [
+        {
+          heading: "Data yang kami proses",
+          body: [
+            "Pertanyaan carian (teks yang anda taip), pilihan bahasa dan mata wang, serta sejarah chat sesi semasa. Sejarah chat disimpan dalam sessionStorage pelayar anda, bukan pada pelayan kami.",
+            "Kami tidak menyimpan nama, nombor telefon atau alamat penghantaran di laman ini; maklumat itu hanya dikongsi melalui WhatsApp apabila anda membuat pesanan.",
+          ],
+        },
+        {
+          heading: "Cookies & storan tempatan",
+          body: [
+            "Cookie mkn_lang (30 hari) menyimpan pilihan bahasa. localStorage mkn_view dan mkn_chat_view menyimpan pilihan paparan grid/senarai.",
+            "Tiada cookie pengiklanan atau pengesan pihak ketiga dipasang oleh laman ini.",
+          ],
+        },
+        {
+          heading: "Pihak ketiga",
+          body: [
+            "Kata kunci carian dihantar kepada CJ Dropshipping dan AliExpress (melalui gateway MyKiraShop). Hasrat chat diproses oleh Google Gemini. Setiap pihak tertakluk kepada dasar privasi masing-masing.",
+          ],
+        },
+        {
+          heading: "Hak anda",
+          body: [
+            "Anda boleh memadam sejarah chat dengan butang “Kosongkan chat” atau mengosongkan storan pelayar. Untuk pertanyaan privasi, hubungi kami di WhatsApp.",
+          ],
+        },
+      ],
+    },
+    terms: {
+      title: "Terma Perkhidmatan",
+      intro:
+        "Dengan menggunakan MyKiraNiaga, anda bersetuju dengan terma di bawah. Sila baca sebelum membuat pesanan.",
+      sections: [
+        {
+          heading: "Perkhidmatan",
+          body: [
+            "MyKiraNiaga ialah enjin carian dan pembanding harga untuk produk dropship. Kami bukan penjual rekod; pesanan diselesaikan dengan pembekal (CJ Dropshipping / AliExpress) melalui pengesahan WhatsApp.",
+          ],
+        },
+        {
+          heading: "Harga & ketersediaan",
+          body: [
+            "Harga dipaparkan dalam mata wang pilihan anda, ditukar daripada harga MYR menggunakan kadar harian, dan mungkin berubah mengikut stok pembekal. Harga muktamad disahkan sebelum pembayaran.",
+          ],
+        },
+        {
+          heading: "Tanggungjawab",
+          body: [
+            "Anda bertanggungjawab memberikan maklumat penghantaran yang tepat. Kami tidak bertanggungjawab atas kelewatan kastam, cukai import, atau kegagalan pembekal di luar kawalan kami.",
+          ],
+        },
+        {
+          heading: "Perubahan terma",
+          body: [
+            "Kami boleh mengemas kini terma ini dari semasa ke semasa. Versi terkini sentiasa dipaparkan di halaman ini.",
+          ],
+        },
+      ],
+    },
+    shipping: {
+      title: "Maklumat Penghantaran",
+      intro:
+        "Semua pesanan dihantar terus daripada pembekal (dropship) ke alamat anda. Tiada stok disimpan oleh MyKiraNiaga.",
+      sections: [
+        {
+          heading: "Masa pemprosesan",
+          body: [
+            "Pesanan disemak dan diteruskan kepada pembekal dalam 1–3 hari bekerja selepas pembayaran disahkan.",
+          ],
+        },
+        {
+          heading: "Masa penghantaran",
+          body: [
+            "Penghantaran rentas sempadan standard mengambil 7–18 hari bekerja melalui CJPacket Ordinary atau AliExpress Standard Shipping. Kelewatan kastam atau cuaca boleh menambah masa.",
+          ],
+        },
+        {
+          heading: "Nombor penjejakan",
+          body: [
+            "Nombor penjejakan diberikan melalui WhatsApp (dan e-mel jika anda memberikannya) sebaik ia tersedia daripada pembekal. Anda juga boleh semak status melalui pautan pada halaman pesanan.",
+          ],
+        },
+        {
+          heading: "Duti & cukai",
+          body: [
+            "Duti import atau cukai (jika ada) ditanggung oleh pembeli mengikut peraturan negara destinasi.",
+          ],
+        },
+      ],
+    },
+    refunds: {
+      title: "Pemulangan & Bayaran Balik",
+      intro:
+        "Kami mahu anda menerima produk yang betul dan berfungsi. Dasar ini terpakai untuk item rosak atau tidak seperti yang dipesan.",
+      sections: [
+        {
+          heading: "Tetingkap 14 hari",
+          body: [
+            "Item yang rosak atau tidak berfungsi semasa tiba boleh diminta pemulangan dalam 14 hari kalendar selepas penghantaran diterima.",
+          ],
+        },
+        {
+          heading: "Bukti diperlukan",
+          body: [
+            "Sertakan foto atau video unboxing yang menunjukkan label penghantaran, keadaan bungkusan dan kecacatan. Permintaan tanpa bukti mungkin ditolak.",
+          ],
+        },
+        {
+          heading: "Aliran kerja",
+          body: [
+            "Hubungi WhatsApp → semakan 2–3 hari bekerja → pilih ganti atau bayaran balik. Untuk item rosak, kos penghantaran semula ditanggung kami.",
+          ],
+        },
+        {
+          heading: "Tidak layak",
+          body: [
+            "Item yang telah digunakan, diubah suai, atau produk digital yang telah dimuat turun tidak layak untuk pemulangan.",
+          ],
+        },
+      ],
+    },
+    contact: {
+      title: "Hubungi Kami",
+      intro:
+        "Pasukan sokongan MyKiraNiaga sedia membantu untuk pertanyaan produk, pesanan dan pemulangan.",
+      sections: [
+        {
+          heading: "WhatsApp (saluran utama)",
+          body: [
+            "WhatsApp Business: +60 17-373 5431 — https://wa.me/60173735431",
+          ],
+        },
+        {
+          heading: "E-mel",
+          body: [
+            "support@mykiraniaga.example (placeholder — akan dikemas kini apabila domain rasmi siap).",
+          ],
+        },
+        {
+          heading: "Waktu operasi",
+          body: [
+            "Isnin–Sabtu, 9:00 pagi – 6:00 petang (MYT). Balasan biasa dalam 24 jam bekerja.",
+          ],
+        },
+      ],
+    },
+  },
+  en: {
+    privacy: {
+      title: "Privacy Policy",
+      intro:
+        "We respect your privacy. This page explains what MyKiraNiaga processes and how you can control it.",
+      sections: [
+        {
+          heading: "Data we process",
+          body: [
+            "Search queries, language/currency choices and the current chat history. Chat history lives in your browser's sessionStorage, not on our servers.",
+            "We do not store names, phone numbers or delivery addresses on this site; those are shared only through WhatsApp when you place an order.",
+          ],
+        },
+        {
+          heading: "Cookies & local storage",
+          body: [
+            "The mkn_lang cookie (30 days) remembers your language. localStorage keys mkn_view and mkn_chat_view remember your grid/list preference.",
+            "No advertising cookies or third-party trackers are set by this site.",
+          ],
+        },
+        {
+          heading: "Third parties",
+          body: [
+            "Search keywords are sent to CJ Dropshipping and AliExpress (via the MyKiraShop gateway). Chat intent is processed by Google Gemini. Each provider follows its own privacy policy.",
+          ],
+        },
+        {
+          heading: "Your rights",
+          body: [
+            "Clear chat history with the “Clear chat” button or by clearing browser storage. For privacy requests, contact us on WhatsApp.",
+          ],
+        },
+      ],
+    },
+    terms: {
+      title: "Terms of Service",
+      intro:
+        "By using MyKiraNiaga you agree to the terms below. Please read them before ordering.",
+      sections: [
+        {
+          heading: "The service",
+          body: [
+            "MyKiraNiaga is a dropshipping search and price-comparison engine. We are not the seller of record; orders are fulfilled by suppliers (CJ Dropshipping / AliExpress) after WhatsApp confirmation.",
+          ],
+        },
+        {
+          heading: "Pricing & availability",
+          body: [
+            "Prices are shown in your selected currency, converted from MYR using daily rates, and may change with supplier stock. The final price is confirmed before payment.",
+          ],
+        },
+        {
+          heading: "Responsibility",
+          body: [
+            "You are responsible for accurate delivery details. We are not liable for customs delays, import taxes, or supplier failures outside our control.",
+          ],
+        },
+        {
+          heading: "Changes",
+          body: [
+            "We may update these terms from time to time. The current version is always published on this page.",
+          ],
+        },
+      ],
+    },
+    shipping: {
+      title: "Shipping Information",
+      intro:
+        "Every order ships directly from the supplier (dropship) to your address. MyKiraNiaga holds no stock.",
+      sections: [
+        {
+          heading: "Processing time",
+          body: [
+            "Orders are reviewed and forwarded to the supplier within 1–3 business days after payment is confirmed.",
+          ],
+        },
+        {
+          heading: "Delivery time",
+          body: [
+            "Standard cross-border delivery takes 7–18 business days via CJPacket Ordinary or AliExpress Standard Shipping. Customs or weather delays may add time.",
+          ],
+        },
+        {
+          heading: "Tracking number",
+          body: [
+            "Tracking numbers are shared via WhatsApp (and email if provided) as soon as the supplier issues them. You can also check the link on the order page.",
+          ],
+        },
+        {
+          heading: "Duties & taxes",
+          body: [
+            "Any import duties or taxes are payable by the buyer according to the destination country's rules.",
+          ],
+        },
+      ],
+    },
+    refunds: {
+      title: "Returns & Refunds",
+      intro:
+        "We want you to receive the right product in working condition. This policy covers damaged or not-as-described items.",
+      sections: [
+        {
+          heading: "14-day window",
+          body: [
+            "Items that arrive damaged or faulty can be returned within 14 calendar days of delivery.",
+          ],
+        },
+        {
+          heading: "Proof required",
+          body: [
+            "Include unboxing photos or video showing the shipping label, packaging condition and the defect. Requests without evidence may be declined.",
+          ],
+        },
+        {
+          heading: "Workflow",
+          body: [
+            "Contact WhatsApp → review within 2–3 business days → choose a replacement or refund. For damaged items, return shipping is covered by us.",
+          ],
+        },
+        {
+          heading: "Not eligible",
+          body: [
+            "Used, modified items and downloaded digital products are not eligible for return.",
+          ],
+        },
+      ],
+    },
+    contact: {
+      title: "Contact Us",
+      intro:
+        "The MyKiraNiaga support team can help with product, order and return questions.",
+      sections: [
+        {
+          heading: "WhatsApp (primary channel)",
+          body: [
+            "WhatsApp Business: +60 17-373 5431 — https://wa.me/60173735431",
+          ],
+        },
+        {
+          heading: "Email",
+          body: [
+            "support@mykiraniaga.example (placeholder — will be updated once the official domain is ready).",
+          ],
+        },
+        {
+          heading: "Operating hours",
+          body: [
+            "Monday–Saturday, 9:00am–6:00pm (MYT). Typical reply within 24 business hours.",
+          ],
+        },
+      ],
+    },
+  },
+  id: {
+    privacy: {
+      title: "Kebijakan Privasi",
+      intro:
+        "Kami menghormati privasi Anda. Halaman ini menjelaskan data yang diproses MyKiraNiaga.",
+      sections: [
+        {
+          heading: "Data yang diproses",
+          body: [
+            "Kata kunci pencarian, pilihan bahasa/mata uang, dan riwayat chat sesi ini. Riwayat chat disimpan di sessionStorage peramban Anda, bukan di server kami.",
+          ],
+        },
+        {
+          heading: "Cookie & penyimpanan lokal",
+          body: [
+            "Cookie mkn_lang (30 hari) menyimpan pilihan bahasa. localStorage mkn_view dan mkn_chat_view menyimpan pilihan tampilan.",
+            "Tidak ada cookie iklan atau pelacak pihak ketiga.",
+          ],
+        },
+        {
+          heading: "Pihak ketiga",
+          body: [
+            "Pencarian dikirim ke CJ Dropshipping dan AliExpress; maksud chat diproses Google Gemini sesuai kebijakan privasi masing-masing.",
+          ],
+        },
+        {
+          heading: "Hak Anda",
+          body: [
+            "Hapus riwayat chat lewat tombol “Bersihkan chat”. Untuk pertanyaan privasi, hubungi WhatsApp kami.",
+          ],
+        },
+      ],
+    },
+    terms: {
+      title: "Syarat Layanan",
+      intro:
+        "Dengan menggunakan MyKiraNiaga, Anda menyetujui syarat berikut.",
+      sections: [
+        {
+          heading: "Layanan",
+          body: [
+            "MyKiraNiaga adalah mesin pencari dan pembanding harga produk dropship. Kami bukan penjual resmi; pesanan dipenuhi pemasok melalui konfirmasi WhatsApp.",
+          ],
+        },
+        {
+          heading: "Harga & ketersediaan",
+          body: [
+            "Harga ditampilkan dalam mata uang pilihan Anda, dikonversi dari MYR dengan kurs harian, dan dapat berubah sesuai stok pemasok. Harga final dikonfirmasi sebelum pembayaran.",
+          ],
+        },
+        {
+          heading: "Tanggung jawab",
+          body: [
+            "Anda bertanggung jawab atas data pengiriman yang akurat. Kami tidak bertanggung jawab atas keterlambatan bea cukai atau kegagalan pemasok di luar kendali kami.",
+          ],
+        },
+      ],
+    },
+    shipping: {
+      title: "Informasi Pengiriman",
+      intro:
+        "Semua pesanan dikirim langsung dari pemasok (dropship) ke alamat Anda.",
+      sections: [
+        {
+          heading: "Waktu pemrosesan",
+          body: [
+            "Pesanan diperiksa dan diteruskan ke pemasok dalam 1–3 hari kerja setelah pembayaran dikonfirmasi.",
+          ],
+        },
+        {
+          heading: "Waktu pengiriman",
+          body: [
+            "Pengiriman lintas negara standar 7–18 hari kerja melalui CJPacket Ordinary atau AliExpress Standard Shipping.",
+          ],
+        },
+        {
+          heading: "Nomor pelacakan",
+          body: [
+            "Nomor pelacakan dikirim melalui WhatsApp (dan email jika ada) begitu tersedia dari pemasok.",
+          ],
+        },
+        {
+          heading: "Bea & pajak",
+          body: [
+            "Bea masuk atau pajak (jika ada) ditanggung pembeli sesuai aturan negara tujuan.",
+          ],
+        },
+      ],
+    },
+    refunds: {
+      title: "Pengembalian & Refund",
+      intro:
+        "Dasar ini berlaku untuk barang rusak atau tidak sesuai pesanan.",
+      sections: [
+        {
+          heading: "Jendela 14 hari",
+          body: [
+            "Barang rusak atau tidak berfungsi saat tiba dapat dikembalikan dalam 14 hari kalender setelah diterima.",
+          ],
+        },
+        {
+          heading: "Bukti diperlukan",
+          body: [
+            "Sertakan foto/video unboxing yang menunjukkan label pengiriman, kondisi kemasan, dan kerusakan.",
+          ],
+        },
+        {
+          heading: "Alur kerja",
+          body: [
+            "Hubungi WhatsApp → peninjauan 2–3 hari kerja → pilih penggantian atau refund. Untuk barang rusak, ongkos kirim pengganti ditanggung kami.",
+          ],
+        },
+        {
+          heading: "Tidak memenuhi syarat",
+          body: [
+            "Barang yang sudah dipakai/dimodifikasi dan produk digital yang sudah diunduh tidak dapat dikembalikan.",
+          ],
+        },
+      ],
+    },
+    contact: {
+      title: "Hubungi Kami",
+      intro: "Tim dukungan MyKiraNiaga siap membantu pertanyaan produk dan pesanan.",
+      sections: [
+        {
+          heading: "WhatsApp (saluran utama)",
+          body: ["WhatsApp Business: +60 17-373 5431 — https://wa.me/60173735431"],
+        },
+        {
+          heading: "Email",
+          body: [
+            "support@mykiraniaga.example (placeholder — akan diperbarui setelah domain resmi siap).",
+          ],
+        },
+        {
+          heading: "Jam operasional",
+          body: [
+            "Senin–Sabtu, 09.00–18.00 (MYT). Balasan biasanya dalam 24 jam kerja.",
+          ],
+        },
+      ],
+    },
+  },
+  zh: {
+    privacy: {
+      title: "隐私政策",
+      intro: "我们尊重您的隐私。本页说明 MyKiraNiaga 处理的数据及您的控制方式。",
+      sections: [
+        {
+          heading: "我们处理的数据",
+          body: [
+            "搜索关键词、语言/货币选择以及本次会话的聊天记录。聊天记录保存在浏览器的 sessionStorage 中，不在我们的服务器上。",
+            "本网站不存储姓名、电话或收货地址；这些信息仅在下单时通过 WhatsApp 共享。",
+          ],
+        },
+        {
+          heading: "Cookie 与本地存储",
+          body: [
+            "Cookie mkn_lang（30 天）记住语言选择；localStorage mkn_view 与 mkn_chat_view 记住网格/列表偏好。",
+            "本网站不设置广告 Cookie 或第三方跟踪器。",
+          ],
+        },
+        {
+          heading: "第三方",
+          body: [
+            "搜索关键词发送至 CJ Dropshipping 与 AliExpress；聊天意图由 Google Gemini 处理，各方遵循其隐私政策。",
+          ],
+        },
+        {
+          heading: "您的权利",
+          body: ["可用“清空聊天”按钮或清除浏览器存储。隐私问题请通过 WhatsApp 联系。"],
+        },
+      ],
+    },
+    terms: {
+      title: "服务条款",
+      intro: "使用 MyKiraNiaga 即表示您同意以下条款。",
+      sections: [
+        {
+          heading: "服务内容",
+          body: [
+            "MyKiraNiaga 是代发商品的搜索与比价引擎。我们不是销售方；订单经 WhatsApp 确认后由供应商（CJ / AliExpress）履约。",
+          ],
+        },
+        {
+          heading: "价格与库存",
+          body: [
+            "价格以您选择的货币显示，按每日汇率由 MYR 换算，可能随供应商库存变化。最终价格在付款前确认。",
+          ],
+        },
+        {
+          heading: "责任",
+          body: [
+            "您需提供准确的收货信息。对于海关延误、进口税费或供应商原因造成的延误，我们不承担责任。",
+          ],
+        },
+        {
+          heading: "条款变更",
+          body: ["我们可能不时更新条款，最新版本始终发布在本页。"],
+        },
+      ],
+    },
+    shipping: {
+      title: "配送信息",
+      intro: "所有订单由供应商直接发货（代发）至您的地址，MyKiraNiaga 不持有库存。",
+      sections: [
+        {
+          heading: "处理时间",
+          body: ["付款确认后 1–3 个工作日内审核并转交供应商。"],
+        },
+        {
+          heading: "运输时间",
+          body: [
+            "标准跨境配送约 7–18 个工作日（CJPacket Ordinary 或 AliExpress Standard Shipping）。海关或天气可能延长。",
+          ],
+        },
+        {
+          heading: "物流单号",
+          body: ["供应商出单后，我们会通过 WhatsApp（如有邮箱则同时发送）提供物流单号。"],
+        },
+        {
+          heading: "关税与税费",
+          body: ["进口关税或税费（如有）由买家按目的地国家规定承担。"],
+        },
+      ],
+    },
+    refunds: {
+      title: "退换与退款",
+      intro: "我们希望您收到正确且可用的商品。本政策适用于损坏或与描述不符的商品。",
+      sections: [
+        {
+          heading: "14 天窗口",
+          body: ["到货时损坏或无法使用的商品，可在签收后 14 个日历日内申请退换。"],
+        },
+        {
+          heading: "需要凭证",
+          body: ["请提供开箱照片或视频，显示运单标签、包装状态与缺陷。"],
+        },
+        {
+          heading: "处理流程",
+          body: [
+            "联系 WhatsApp → 2–3 个工作日审核 → 选择补发或退款。损坏商品的退回运费由我们承担。",
+          ],
+        },
+        {
+          heading: "不适用",
+          body: ["已使用、改装过的商品及已下载的数字产品不支持退换。"],
+        },
+      ],
+    },
+    contact: {
+      title: "联系我们",
+      intro: "MyKiraNiaga 支持团队可协助产品、订单与退换问题。",
+      sections: [
+        {
+          heading: "WhatsApp（主要渠道）",
+          body: ["WhatsApp Business：+60 17-373 5431 — https://wa.me/60173735431"],
+        },
+        {
+          heading: "邮箱",
+          body: ["support@mykiraniaga.example（占位，正式域名准备后更新）。"],
+        },
+        {
+          heading: "营业时间",
+          body: ["周一至周六 09:00–18:00（MYT），通常 24 个工作小时内回复。"],
+        },
+      ],
+    },
+  },
+};
+
+function policyBody(slug: PolicySlug, lang: Lang): string {
+  const doc = POLICY[lang][slug];
+  const back = `<a class="pback" href="/">← ${esc(t(lang, "back_home"))}</a>`;
+
+  return `<div class="policy">
+  ${back}
+  <h1>${esc(doc.title)}</h1>
+  <p class="pintro">${esc(doc.intro)}</p>
+  ${doc.sections
+    .map(
+      (section) =>
+        `<section><h2>${esc(section.heading)}</h2>${section.body
+          .map((paragraph) => `<p>${esc(paragraph)}</p>`)
+          .join("")}</section>`,
+    )
+    .join("")}
+  <p class="updated">${esc(t(lang, "policy_updated"))}</p>
+  ${back}
+</div>`;
+}
+
 function errorBody(message: string, lang: Lang): string {
   return `<div class="err-box">
   <h1>${esc(t(lang, "error_title"))}</h1>
@@ -3421,6 +4070,7 @@ app.get("/", async (c) => {
         "GET /api/search?q=": "search (JSON only)",
         "GET /checkout?source=&id=&base=&currency=": "order summary + WhatsApp handoff (converted)",
         "GET /status": "system status page (HTML) · JSON with ?format=json",
+        "GET /privacy|/terms|/shipping|/refunds|/contact": "policy pages (4 languages)",
         "GET /health": "health probe + key status",
       },
       config: configStatus(c.env),
@@ -3923,6 +4573,34 @@ app.get("/health", (c) =>
 );
 
 app.get("/robots.txt", (c) => c.text("User-agent: *\nAllow: /\n"));
+
+for (const slug of POLICY_SLUGS) {
+  app.get(`/${slug}`, (c) => {
+    const lang = langFrom(c);
+    const doc = POLICY[lang][slug];
+
+    if (wantsJson(c)) {
+      return c.json({
+        ok: true,
+        slug,
+        lang,
+        title: doc.title,
+        intro: doc.intro,
+        sections: doc.sections,
+      });
+    }
+
+    return c.html(
+      layout({
+        title: `${doc.title} — MyKiraNiaga`,
+        description: doc.intro,
+        body: policyBody(slug, lang),
+        lang,
+        currentUrl: c.req.url,
+      }),
+    );
+  });
+}
 
 app.notFound((c) => {
   const lang = langFrom(c);
