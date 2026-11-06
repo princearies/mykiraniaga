@@ -1642,6 +1642,19 @@ const CATEGORY_RULES: CategoryRule[] = [
     test: /\b(gpu|graphics card|rtx|gtx)\b/i,
     min_total_myr: 200,
   },
+  {
+    // A bare "chainsaw" search returns chains, files and sharpening bits.
+    test: /\b(chainsaw|chain saw)\b/i,
+    min_total_myr: 120,
+    exclude:
+      /\b(chain|chains|blade|blades|sharpening|sharpener|bit|bits|guide|plate|bar|bars|file|files|oil|helmet|glove|gloves|bag|case|cover|sprocket|rim|tension|accessor|accessories|part|parts|repair|kit|manga|figure|poster|toy|sticker)\b/i,
+  },
+  {
+    test: /\b(drill|driver)\b/i,
+    min_total_myr: 80,
+    exclude:
+      /\b(bit|bits|chuck|charger|battery only|case|bag|stand|holder|accessor|accessories)\b/i,
+  },
 ];
 
 function categoryRuleFor(keyword: string): CategoryRule | null {
@@ -1849,6 +1862,10 @@ const SUPPLIER_QUERY: Record<string, string> = {
   monitor: "computer monitor",
   gpu: "graphics card",
   camera: "digital camera",
+  chainsaw: "electric chainsaw",
+  "chain saw": "electric chainsaw",
+  drill: "electric drill",
+  grinder: "angle grinder",
 };
 
 function supplierQuery(keyword: string): string {
@@ -2606,7 +2623,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     view_compact: "Grid kecil",
     view_list: "Senarai",
     floor_empty:
-      "Semua hasil bawah harga minimum kategori (aksesori) ditapis keluar. Cuba kata kunci lebih spesifik, cth: \"laptop computer\".",
+      "Semua hasil bawah harga minimum kategori (aksesori) ditapis keluar. Cuba kata kunci lebih spesifik — tambah jenis seperti \"electric\" atau \"cordless\".",
   },
   en: {
     tagline: "on-demand dropshipping search",
@@ -2702,7 +2719,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     view_compact: "Small grid",
     view_list: "List",
     floor_empty:
-      "Every result below the category price floor (accessories) was filtered out. Try a more specific keyword, e.g. \"laptop computer\".",
+      "Every result below the category price floor (accessories) was filtered out. Try a more specific keyword — add a type such as \"electric\" or \"cordless\".",
   },
   id: {
     tagline: "pencarian dropship on-demand",
@@ -2757,7 +2774,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     status_lede:
       "Pemeriksaan konfigurasi mesin: kunci API, margin, dan nomor WhatsApp.",
     floor_empty:
-      "Semua hasil di bawah harga minimum kategori (aksesori) disaring. Coba kata kunci lebih spesifik.",
+      "Semua hasil di bawah harga minimum kategori (aksesori) disaring. Coba kata kunci lebih spesifik — tambahkan jenis seperti \"electric\" atau \"cordless\".",
   },
   zh: {
     tagline: "按需代发商品搜索",
@@ -2810,7 +2827,7 @@ const STRINGS: Record<Lang, Record<string, string>> = {
     checkout_product: "商品",
     status_lede: "引擎配置检查：API 密钥、利润和 WhatsApp 号码。",
     floor_empty:
-      "所有低于该类目最低价（配件）的结果已被过滤。请尝试更具体的关键词。",
+      "所有低于该类目最低价（配件）的结果已被过滤。请尝试更具体的关键词，例如加上“electric”或“cordless”。",
   },
 };
 
@@ -2958,6 +2975,7 @@ function chatBody(
   var PLACEHOLDER = ${JSON.stringify(placeholder)};
   var METRICS_IDLE = ${JSON.stringify(metricsIdle)};
   var LABEL_PRODUCTS = ${JSON.stringify(t(lang, "results_products"))};
+  var LABEL_FILTERED = ${JSON.stringify(t(lang, "results_filtered"))};
   var PILL_TEXT = ${JSON.stringify(t(lang, "chat_view_products"))};
 
   function isMobile() { return window.matchMedia("(max-width: 768px)").matches; }
@@ -3088,7 +3106,7 @@ function chatBody(
     var bits = [m.count + " " + LABEL_PRODUCTS];
     if (m.timing_ms) bits.push(m.timing_ms + " ms");
     if (m.filters && m.filters.length) bits.push(m.filters.join(", "));
-    if (m.removed) bits.push("-" + m.removed);
+    if (m.removed) bits.push(m.removed + " " + LABEL_FILTERED);
     metrics.textContent = bits.join(" · ");
     if (countBadge) countBadge.textContent = m.count ? "(" + m.count + ")" : "";
 

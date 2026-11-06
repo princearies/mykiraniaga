@@ -629,5 +629,42 @@ console.log("21) trending hot items");
   check("trending usd price", usdBody.includes("$"));
 }
 
+console.log("22) chainsaw accuracy");
+{
+  const res = await req("/api/search?q=" + encodeURIComponent("chainsaw bawah RM500"));
+  const data = await res.json();
+  check("chainsaw floor 120", data.meta?.floor?.min_total_myr === 120, JSON.stringify(data.meta?.floor));
+  check("chainsaw results", data.results.length > 0, data.results.length);
+  check(
+    "no chainsaw accessories",
+    data.results.every(
+      (p) =>
+        !/\b(sharpening|sharpen|guide plate|tension|sprocket)\b/i.test(p.title) &&
+        !/\bchain blades?\b/i.test(p.title),
+    ),
+    JSON.stringify(data.results.map((p) => p.title).slice(0, 3)),
+  );
+  check(
+    "within budget",
+    data.results.every((p) => p.total_myr <= 500),
+  );
+
+  const chat = await req("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messages: [{ role: "user", content: "cari chainsaw budget below rm500" }],
+    }),
+  });
+  const chatData = await chat.json();
+  check("chat chainsaw keyword", chatData.intent?.keyword === "chainsaw", String(chatData.intent?.keyword));
+  check("chat chainsaw products", (chatData.products ?? []).length > 0);
+  check(
+    "chat chainsaw not accessories",
+    (chatData.products ?? []).every((p) => /chainsaw|saw/i.test(p.title)),
+    JSON.stringify((chatData.products ?? []).map((p) => p.title).slice(0, 3)),
+  );
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
