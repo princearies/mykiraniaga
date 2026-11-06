@@ -515,14 +515,18 @@ async function searchCj(env: Env, keyword: string, fx: number): Promise<SourceOu
   const started = Date.now();
 
   if (!env.CJ_ACCESS_TOKEN) {
+    const items = demoProducts("cj", keyword, fx);
     return {
-      report: emptyReport(
-        "cj",
-        "placeholder",
-        Date.now() - started,
-        "CJ_ACCESS_TOKEN not set — demo catalogue",
-      ),
-      items: demoProducts("cj", keyword, fx),
+      report: {
+        ...emptyReport(
+          "cj",
+          "placeholder",
+          Date.now() - started,
+          "CJ_ACCESS_TOKEN not set — demo catalogue",
+        ),
+        count: items.length,
+      },
+      items,
     };
   }
 
@@ -656,14 +660,18 @@ async function searchAliExpress(
   const started = Date.now();
 
   if (!env.ALIEXPRESS_APP_KEY || !env.ALIEXPRESS_APP_SECRET) {
+    const items = demoProducts("aliexpress", keyword, fx);
     return {
-      report: emptyReport(
-        "aliexpress",
-        "placeholder",
-        Date.now() - started,
-        "AliExpress credentials not set — demo catalogue",
-      ),
-      items: demoProducts("aliexpress", keyword, fx),
+      report: {
+        ...emptyReport(
+          "aliexpress",
+          "placeholder",
+          Date.now() - started,
+          "AliExpress credentials not set — demo catalogue",
+        ),
+        count: items.length,
+      },
+      items,
     };
   }
 
