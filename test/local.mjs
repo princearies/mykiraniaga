@@ -707,5 +707,34 @@ console.log("23) tool intelligence + visual guardrail");
   check("drill products <= 6", (drillData.products ?? []).length <= 6);
 }
 
+console.log("24) product detail modal");
+{
+  const search = await req("/search?q=earbuds");
+  const body = await search.text();
+  check("detail trigger", body.includes("data-detail") && body.includes("Lihat Detail"));
+  check("modal shell", body.includes('id="pm"') && body.includes('id="pmbody"'));
+  check("modal script", body.includes("/api/product"));
+
+  const detail = await req(
+    "/api/product?source=cj&id=abc123&title=Test+Chainsaw&base=50&lang=ms",
+  );
+  const data = await detail.json();
+  check("product api ok", data.ok === true, JSON.stringify(data).slice(0, 80));
+  check("has specs", data.html.includes("Spesifikasi"));
+  check("has cost table", data.html.includes("Pecahan Kos"));
+  check("has reviews", data.html.includes("Ulasan"));
+  check("has sticky actions", data.html.includes('class="pmactions"'));
+  check("has wa link", data.wa_url.startsWith("https://wa.me/"));
+  check("has tg link", data.tg_url.startsWith("https://t.me/Mykirashopbot"));
+  check("in stock", data.html.includes("Dalam stok"));
+
+  const en = await req("/api/product?source=cj&id=abc&title=Drill&base=40&lang=en");
+  const enData = await en.json();
+  check("english detail", enData.html.includes("Specifications") && enData.html.includes("Customer Reviews"));
+
+  const bad = await req("/api/product?source=xx&id=&base=abc");
+  check("invalid detail 400", bad.status === 400, bad.status);
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

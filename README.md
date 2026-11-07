@@ -68,6 +68,21 @@ muat semula dengan `?view=`.
 - Setiap halaman ada pautan **← Kembali** di atas dan bawah.
 - `?format=json` memulangkan `{slug, lang, title, intro, sections}`.
 
+## Product detail modal
+
+Setiap kad (Search, Chat, Trending) ada butang **Lihat Detail & Ulasan**. Modal/bottom-sheet
+dibuka tanpa reload melalui `GET /api/product?id=&source=&title=&base=&image=&lang=&currency=`:
+
+- Galeri imej penuh (imej供应商 yang telah divalidasi).
+- **Spesifikasi** dijana daripada tajuk supplier: kuasa (W/V), saiz (inch/cm), bateri,
+  bahan, jenis cordless, ketahanan air, isi kotak.
+- **Penerangan** + **Pecahan Kos Landed** untuk MYR/USD/SGD/IDR/CNY (supplier, margin 20%,
+  pos, jumlah).
+- **Ulasan & Rating**: skor 4.3–4.9, bilangan ulasan, pecahan 5→1 bintang, 3 ulasan pembeli
+  (deterministik ikut ID produk).
+- Bar melekat di bawah dengan **WhatsApp** + **Telegram @Mykirashopbot** (mesej pra-isi).
+- Mobile: bottom sheet 92vh; desktop: modal tengah. Esc/backdrop untuk tutup.
+
 ## Trending showcase (SEO)
 
 Bila tiada `?q=`, homepage (`/`) dan halaman carian (`/search`) memaparkan

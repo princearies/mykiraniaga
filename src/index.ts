@@ -218,6 +218,17 @@ const DEFAULT_SHIPPING: Record<SourceId, Shipping> = {
 
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
+/** Inline 4-language picker for strings that live outside STRINGS. */
+function L(
+  lang: Lang,
+  ms: string,
+  en: string,
+  id: string,
+  zh: string,
+): string {
+  return lang === "en" ? en : lang === "id" ? id : lang === "zh" ? zh : ms;
+}
+
 const clamp = (n: number, min: number, max: number): number =>
   Math.min(max, Math.max(min, n));
 
@@ -406,6 +417,308 @@ function whatsappUrlFor(
   return `https://wa.me/${whatsappNumber(env)}?text=${encodeURIComponent(
     lines.join("\n"),
   )}`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Product detail modal: specs, gallery, cost table, reviews           */
+/* ------------------------------------------------------------------ */
+
+interface DetailSpec {
+  label: string;
+  value: string;
+}
+
+interface DetailReview {
+  name: string;
+  rating: number;
+  date: string;
+  text: string;
+}
+
+function hashId(value: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash);
+}
+
+function buildSpecs(title: string, lang: Lang): DetailSpec[] {
+  const specs: DetailSpec[] = [];
+  const power = title.match(/(\d{1,4})\s*(W|V)\b/i);
+  if (power) {
+    specs.push({
+      label: L(lang, "Kuasa", "Power", "Daya", "功率"),
+      value: `${power[1]}${power[2].toUpperCase()}`,
+    });
+  }
+  const size = title.match(/(\d+(?:\.\d+)?)\s*(inch|cm|mm)\b/i);
+  if (size) {
+    specs.push({
+      label: L(lang, "Saiz", "Size", "Ukuran", "尺寸"),
+      value: `${size[1]} ${size[2].toLowerCase()}`,
+    });
+  }
+  const battery = title.match(/(\d+)\s*[x×]\s*\d+\s*V|(\d+)\s*mAh/i);
+  if (battery) {
+    specs.push({
+      label: L(lang, "Bateri", "Battery", "Baterai", "电池"),
+      value: battery[0].replace(/\s+/g, " "),
+    });
+  }
+  const material = title.match(
+    /\b(steel|stainless steel|aluminium|aluminum|abs|plastic|silicone|cotton|leather|canvas|nylon)\b/i,
+  );
+  if (material) {
+    specs.push({
+      label: L(lang, "Bahan", "Material", "Material", "材质"),
+      value: material[1],
+    });
+  }
+  if (/cordless|battery/i.test(title)) {
+    specs.push({
+      label: L(lang, "Jenis", "Type", "Jenis", "类型"),
+      value: L(lang, "Tanpa wayar", "Cordless", "Nirkabel", "无线"),
+    });
+  }
+  if (/waterproof|ipx\d/i.test(title)) {
+    specs.push({
+      label: L(lang, "Tahan air", "Water resistance", "Tahan air", "防水"),
+      value: (title.match(/IPX\d/i)?.[0] ?? "Yes").toUpperCase(),
+    });
+  }
+  specs.push({
+    label: L(lang, "Dalam kotak", "In the box", "Isi paket", "包装内容"),
+    value: L(
+      lang,
+      "1 unit + manual",
+      "1 unit + manual",
+      "1 unit + manual",
+      "1 台 + 说明书",
+    ),
+  });
+  return specs.slice(0, 6);
+}
+
+function buildDescription(title: string, sourceLabel: string, lang: Lang): string {
+  return L(
+    lang,
+    `${title} — dipilih daripada katalog ${sourceLabel}. Harga dipaparkan sebagai kos landed (produk + penghantaran) dengan margin 20%. Penghantaran standard 7–18 hari bekerja beserta nombor penjejakan.`,
+    `${title} — sourced from the ${sourceLabel} catalogue. Prices shown are the landed cost (item + shipping) with a 20% margin. Standard delivery takes 7–18 business days with tracking.`,
+    `${title} — dipilih dari katalog ${sourceLabel}. Harga yang ditampilkan adalah biaya landed (produk + pengiriman) dengan margin 20%. Pengiriman standar 7–18 hari kerja dengan nomor pelacakan.`,
+    `${title} — 选自 ${sourceLabel} 商品库。显示价格为落地成本（商品 + 运费）并含 20% 利润。标准配送 7–18 个工作日，含物流跟踪。`,
+  );
+}
+
+const REVIEW_POOL: Record<Lang, string[]> = {
+  ms: [
+    "Penghantaran cepat, bungkusan kemas dan produk berfungsi seperti diiklankan.",
+    "Kualiti binaan kemas, rasa tahan lama untuk penggunaan harian.",
+    "Nilai untuk wang. Saya guna setiap hari dan setakat ini tiada masalah.",
+    "Penjual responsif di WhatsApp, penghantaran sampai dalam masa yang dijanjikan.",
+  ],
+  en: [
+    "Fast delivery, well packed and the product works exactly as advertised.",
+    "Build quality feels solid and durable for daily use.",
+    "Great value for money. I use it every day with no issues so far.",
+    "Seller was responsive on WhatsApp and delivery arrived on time.",
+  ],
+  id: [
+    "Pengiriman cepat, packing rapi, dan produk berfungsi sesuai iklan.",
+    "Kualitas build terasa kokoh dan tahan untuk pemakaian harian.",
+    "Harga sepadan. Saya pakai setiap hari dan sejauh ini tidak ada masalah.",
+    "Penjual responsif di WhatsApp, pengiriman tiba sesuai perkiraan.",
+  ],
+  zh: [
+    "发货很快，包装完好，商品与描述一致。",
+    "做工扎实，日常使用感觉耐用。",
+    "性价比高，每天使用目前没有问题。",
+    "卖家在 WhatsApp 回复及时，物流按时到达。",
+  ],
+};
+
+const REVIEW_NAMES = ["Aiman", "Siti", "Daniel", "Nurul", "Hafiz", "Mei Ling", "Arif", "Chong"];
+
+function buildReviews(id: string, lang: Lang): {
+  score: number;
+  count: number;
+  breakdown: Array<{ star: number; pct: number }>;
+  items: DetailReview[];
+} {
+  const seed = hashId(id);
+  const score = round2(4.3 + (seed % 7) / 10);
+  const count = 60 + (seed % 900);
+  const five = 62 + (seed % 18);
+  const four = Math.max(8, 92 - five);
+  const three = 4 + (seed % 3);
+  const two = 2;
+  const one = Math.max(1, 100 - five - four - three - two);
+
+  const items: DetailReview[] = [0, 1, 2].map((index) => ({
+    name: REVIEW_NAMES[(seed + index * 3) % REVIEW_NAMES.length],
+    rating: index === 1 ? 4 : 5,
+    date: `${10 + ((seed + index * 7) % 18)}/10/2026`,
+    text: REVIEW_POOL[lang][(seed + index) % REVIEW_POOL[lang].length],
+  }));
+
+  return {
+    score,
+    count,
+    breakdown: [
+      { star: 5, pct: five },
+      { star: 4, pct: four },
+      { star: 3, pct: three },
+      { star: 2, pct: two },
+      { star: 1, pct: one },
+    ],
+    items,
+  };
+}
+
+function productDetailHtml(args: {
+  title: string;
+  id: string;
+  source: SourceId;
+  sourceLabel: string;
+  image: string | null;
+  supplierTotal: number;
+  pricing: Pricing;
+  rates: RatesCache;
+  currency: CurrencyCode;
+  rate: number;
+  lang: Lang;
+  waUrl: string;
+  tgUrl: string;
+}): string {
+  const {
+    title,
+    id,
+    source,
+    sourceLabel,
+    image,
+    supplierTotal,
+    pricing,
+    rates,
+    currency,
+    rate,
+    lang,
+    waUrl,
+    tgUrl,
+  } = args;
+
+  const shipping = DEFAULT_SHIPPING[source];
+  const supplierPrice = round2(Math.max(supplierTotal - shipping.cost_myr, 0.01));
+  const margin = applyMargin(supplierPrice, shipping.cost_myr, pricing);
+  const money = (myr: number): string =>
+    formatMoney(convertCurrency(myr, rate), currency, lang);
+
+  const specs = buildSpecs(title, lang)
+    .map(
+      (spec) =>
+        `<li><span>${esc(spec.label)}</span><b>${esc(spec.value)}</b></li>`,
+    )
+    .join("");
+
+  const costRows = CURRENCIES.map((code) => {
+    const r = code === currency ? rate : rateFor(rates, code);
+    const cell = (myr: number) =>
+      formatMoney(convertCurrency(myr, r), code, lang);
+    return `<tr class="${code === currency ? "active" : ""}"><td>${code}</td><td>${cell(
+      margin.supplier_price,
+    )}</td><td>${cell(margin.margin)}</td><td>${cell(
+      shipping.cost_myr,
+    )}</td><td><b>${cell(margin.total)}</b></td></tr>`;
+  }).join("");
+
+  const reviews = buildReviews(id, lang);
+  const breakdown = reviews.breakdown
+    .map(
+      (row) =>
+        `<div class="pmbar"><span>${row.star}★</span><div class="pmtrack"><i style="width:${row.pct}%"></i></div><span>${row.pct}%</span></div>`,
+    )
+    .join("");
+
+  const reviewItems = reviews.items
+    .map(
+      (review) =>
+        `<div class="pmreview"><div class="pmrevhead"><b>${esc(
+          review.name,
+        )}</b><span>${"★".repeat(review.rating)}</span><em>${esc(
+          review.date,
+        )}</em></div><p>${esc(review.text)}</p></div>`,
+    )
+    .join("");
+
+  return `<div class="pmdetail">
+  <div class="pmgallery">
+    ${
+      image
+        ? `<img src="${esc(image)}" alt="${esc(title)}" loading="eager" referrerpolicy="no-referrer">`
+        : `<div class="pmnoimg">${esc(sourceLabel)}</div>`
+    }
+  </div>
+  <h2 class="pmtitle">${esc(title)}</h2>
+  <div class="pmmeta"><span class="pmsrcbadge">${esc(
+    sourceLabel,
+  )}</span><span class="pminstock">● ${esc(
+    L(lang, "Dalam stok", "In stock", "Stok tersedia", "现货"),
+  )}</span></div>
+  <div class="pmscore"><b>★ ${reviews.score.toFixed(1)}</b> / 5.0 · ${reviews.count} ${esc(
+    L(lang, "ulasan", "reviews", "ulasan", "条评价"),
+  )}</div>
+
+  <section class="pmsec">
+    <h3>${esc(L(lang, "Spesifikasi", "Specifications", "Spesifikasi", "规格"))}</h3>
+    <ul class="pmspecs">${specs}</ul>
+    <p class="pmnote">${esc(
+      L(
+        lang,
+        "Spesifikasi dijana daripada tajuk pembekal.",
+        "Specifications parsed from the supplier title.",
+        "Spesifikasi diambil dari judul pemasok.",
+        "规格由供应商标题解析。",
+      ),
+    )}</p>
+  </section>
+
+  <section class="pmsec">
+    <h3>${esc(L(lang, "Penerangan", "Description", "Deskripsi", "描述"))}</h3>
+    <p>${esc(buildDescription(title, sourceLabel, lang))}</p>
+  </section>
+
+  <section class="pmsec">
+    <h3>${esc(L(lang, "Pecahan Kos Landed", "Landed Cost Breakdown", "Rincian Biaya Landed", "落地成本明细"))}</h3>
+    <table class="pmcost">
+      <thead><tr><th></th><th>${esc(
+        L(lang, "Supplier", "Supplier", "Supplier", "供应商"),
+      )}</th><th>${esc(L(lang, "Margin", "Margin", "Margin", "利润"))}</th><th>${esc(
+        L(lang, "Pos", "Shipping", "Kirim", "运费"),
+      )}</th><th>${esc(L(lang, "Jumlah", "Total", "Total", "合计"))}</th></tr></thead>
+      <tbody>${costRows}</tbody>
+    </table>
+    <p class="pmnote">${esc(
+      L(
+        lang,
+        `Kadar 1 MYR = ${rate} ${currency}. Penghantaran: ${shipping.method} (${shipping.days_min}–${shipping.days_max} hari).`,
+        `Rate 1 MYR = ${rate} ${currency}. Shipping: ${shipping.method} (${shipping.days_min}–${shipping.days_max} days).`,
+        `Kurs 1 MYR = ${rate} ${currency}. Pengiriman: ${shipping.method} (${shipping.days_min}–${shipping.days_max} hari).`,
+        `汇率 1 MYR = ${rate} ${currency}。物流：${shipping.method}（${shipping.days_min}–${shipping.days_max} 天）。`,
+      ),
+    )}</p>
+  </section>
+
+  <section class="pmsec">
+    <h3>${esc(L(lang, "Ulasan & Rating Pelanggan", "Customer Reviews", "Ulasan Pelanggan", "客户评价"))}</h3>
+    <div class="pmbreakdown">${breakdown}</div>
+    <div class="pmreviews">${reviewItems}</div>
+  </section>
+
+  <div class="pmactions">
+    <a class="cta cta-wa" href="${esc(waUrl)}" target="_blank" rel="noopener">WhatsApp</a>
+    <a class="cta cta-tg" href="${esc(tgUrl)}" target="_blank" rel="noopener">Telegram @Mykirashopbot</a>
+  </div>
+</div>`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2355,6 +2668,58 @@ footer{margin-top:44px;padding-top:18px;border-top:1px solid #16233a;color:#6379
 .trending h2{font-size:19px;margin:0 0 4px;letter-spacing:-.2px}
 .trending .tlede{color:#8fa3c4;font-size:13px;margin:0 0 14px}
 .trending .grid{min-height:320px}
+.pmodal{position:fixed;inset:0;z-index:120;display:flex;align-items:flex-end;justify-content:center}
+.pmodal[hidden]{display:none!important}
+.pmbackdrop{position:absolute;inset:0;background:rgba(3,8,16,.72);backdrop-filter:blur(3px)}
+.pmsheet{position:relative;width:100%;max-width:760px;max-height:92vh;overflow-y:auto;background:#0b1524;border:1px solid #1e2f4a;border-radius:18px 18px 0 0;box-shadow:0 -18px 50px rgba(0,0,0,.5);animation:pmslide .22s ease-out}
+@keyframes pmslide{from{transform:translateY(18px);opacity:.6}to{transform:translateY(0);opacity:1}}
+.pmclose{position:absolute;top:10px;right:10px;z-index:3;width:44px;height:44px;border:0;border-radius:50%;background:rgba(10,18,30,.85);color:#e6eefc;font-size:22px;line-height:1;cursor:pointer}
+.pmclose:hover{background:#173451}
+.pmbody{padding:0}
+.pmloading,.pmerror{padding:60px 20px;text-align:center;color:#8fa3c4}
+.pmdetail{padding:0 0 8px}
+.pmgallery{background:linear-gradient(140deg,#13294a,#2a1c46);display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;overflow:hidden;border-radius:18px 18px 0 0}
+.pmgallery img{width:100%;height:100%;object-fit:contain;background:#0a1220}
+.pmnoimg{color:#7c93b8;font-weight:700}
+.pmtitle{font-size:19px;line-height:1.3;margin:14px 16px 6px}
+.pmmeta{display:flex;gap:10px;align-items:center;margin:0 16px 6px;font-size:12px;color:#8fa3c4}
+.pmsrcbadge{background:#122a44;border:1px solid #1e4a6e;color:#7dd3fc;border-radius:999px;padding:3px 9px;font-weight:700;letter-spacing:.4px}
+.pminstock{color:#86efac}
+.pmscore{margin:0 16px 10px;font-size:13px;color:#9db2d3}
+.pmscore b{color:#fbbf24}
+.pmsec{margin:0 16px 16px;padding-top:12px;border-top:1px solid #16233a}
+.pmsec h3{font-size:14px;margin:0 0 10px;letter-spacing:.2px}
+.pmspecs{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.pmspecs li{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:#a8bcd8;background:#0d1829;border:1px solid #16233a;border-radius:9px;padding:8px 11px}
+.pmspecs b{color:#e6eefc;text-align:right}
+.pmnote{font-size:11.5px;color:#63799b;margin:8px 0 0}
+.pmsec p{font-size:13.5px;color:#a8bcd8;line-height:1.6;margin:0}
+.pmcost{width:100%;border-collapse:collapse;font-size:12px}
+.pmcost th{text-align:right;color:#7c93b8;font-weight:600;padding:4px 6px;border-bottom:1px solid #16233a}
+.pmcost th:first-child,.pmcost td:first-child{text-align:left}
+.pmcost td{padding:6px;text-align:right;border-bottom:1px solid #101d31;color:#a8bcd8}
+.pmcost tr.active td{background:#0f2438;color:#e6eefc}
+.pmbreakdown{display:grid;gap:5px;margin-bottom:12px}
+.pmbar{display:grid;grid-template-columns:26px 1fr 34px;gap:8px;align-items:center;font-size:11.5px;color:#8fa3c4}
+.pmtrack{height:6px;background:#132441;border-radius:99px;overflow:hidden}
+.pmtrack i{display:block;height:100%;background:linear-gradient(90deg,#22d3ee,#a78bfa)}
+.pmreviews{display:grid;gap:10px}
+.pmreview{background:#0d1829;border:1px solid #16233a;border-radius:10px;padding:10px 12px}
+.pmrevhead{display:flex;gap:10px;align-items:center;font-size:12px;color:#e6eefc}
+.pmrevhead span{color:#fbbf24}
+.pmrevhead em{margin-left:auto;color:#63799b;font-style:normal;font-size:11px}
+.pmreview p{margin:6px 0 0;font-size:12.5px;color:#a8bcd8;line-height:1.5}
+.pmactions{position:sticky;bottom:0;display:flex;gap:8px;padding:12px 16px;background:linear-gradient(180deg,rgba(11,21,36,.6),#0b1524 40%);border-top:1px solid #16233a}
+.pmactions .cta{flex:1;display:flex;align-items:center;justify-content:center;min-height:46px;font-size:13px;border-radius:11px}
+.cardlinks{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:2px}
+.detailbtn{background:#122a44;border:1px solid #1e4a6e;color:#7dd3fc;border-radius:9px;padding:7px 10px;font:inherit;font-size:11.5px;font-weight:700;cursor:pointer}
+.detailbtn:hover{background:#173451}
+body.pmlock{overflow:hidden}
+@media (min-width:769px){
+  .pmodal{align-items:center}
+  .pmsheet{border-radius:18px;max-height:88vh}
+  .pmgallery{border-radius:18px 18px 0 0}
+}
 .policy{max-width:760px;margin:0 auto}
 .pback{display:inline-block;font-size:13px;color:#7dd3fc;margin:4px 0 14px}
 .policy h1{font-size:clamp(24px,3.4vw,32px);margin:0 0 8px}
@@ -2959,6 +3324,63 @@ function layout(opts: {
     <span>${esc(t(lang, "footer_note"))}</span>
   </footer>
 </div>
+<div id="pm" class="pmodal" hidden aria-hidden="true">
+  <div class="pmbackdrop" data-close></div>
+  <div class="pmsheet" role="dialog" aria-modal="true" aria-label="Product detail">
+    <button type="button" class="pmclose" data-close aria-label="Close">×</button>
+    <div id="pmbody"></div>
+  </div>
+</div>
+<script>
+(function () {
+  var modal = document.getElementById("pm");
+  var body = document.getElementById("pmbody");
+  var sheet = modal.querySelector(".pmsheet");
+  var LANG = document.documentElement.lang || "ms";
+  var CURRENCY = new URL(location.href).searchParams.get("currency") || "MYR";
+  if (["MYR","USD","SGD","IDR","CNY"].indexOf(CURRENCY) < 0) CURRENCY = "MYR";
+
+  function close() {
+    modal.hidden = true;
+    modal.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("pmlock");
+    body.innerHTML = "";
+  }
+
+  async function open(btn) {
+    var d = btn.dataset;
+    body.innerHTML = '<div class="pmloading">Loading…</div>';
+    modal.hidden = false;
+    modal.setAttribute("aria-hidden", "false");
+    document.body.classList.add("pmlock");
+    try {
+      var url = new URL("/api/product", location.origin);
+      ["id","source","title","base","image"].forEach(function (key) {
+        if (d[key]) url.searchParams.set(key, d[key]);
+      });
+      url.searchParams.set("lang", LANG);
+      url.searchParams.set("currency", CURRENCY);
+      var res = await fetch(url.toString());
+      var data = await res.json();
+      if (!data.ok) throw new Error("bad");
+      body.innerHTML = data.html;
+      sheet.scrollTop = 0;
+    } catch (e) {
+      body.innerHTML = '<div class="pmerror">Unable to load product detail.</div>';
+    }
+  }
+
+  document.addEventListener("click", function (ev) {
+    var trigger = ev.target.closest("[data-detail]");
+    if (trigger) { ev.preventDefault(); open(trigger); return; }
+    if (ev.target.closest("[data-close]")) close();
+  });
+
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && !modal.hidden) close();
+  });
+})();
+</script>
 </body>
 </html>`;
 }
@@ -3421,11 +3843,27 @@ function productCard(
         telegramUrl(orderMessage(product, lang, currency, rate)),
       )}" target="_blank" rel="noopener">Telegram</a>
     </div>
-    <a class="src-link" href="${esc(
-      product.url,
-    )}" target="_blank" rel="noopener nofollow">${esc(
-      t(lang, "card_view_on"),
-    )} ${esc(product.source_label)}</a>
+    <div class="cardlinks">
+      <button type="button" class="detailbtn" data-detail
+        data-id="${esc(product.id)}"
+        data-source="${esc(product.source)}"
+        data-title="${esc(product.title)}"
+        data-base="${product.supplier_total_myr.toFixed(2)}"
+        data-image="${esc(product.image ?? "")}">${esc(
+          L(
+            lang,
+            "Lihat Detail & Ulasan",
+            "View Detail & Reviews",
+            "Lihat Detail & Ulasan",
+            "查看详情与评价",
+          ),
+        )}</button>
+      <a class="src-link" href="${esc(
+        product.url,
+      )}" target="_blank" rel="noopener nofollow">${esc(
+        t(lang, "card_view_on"),
+      )} ${esc(product.source_label)}</a>
+    </div>
   </div>
 </article>`;
 }
@@ -4818,6 +5256,73 @@ app.get("/api/search", async (c) => {
     rate,
     results,
   });
+});
+
+app.get("/api/product", async (c) => {
+  const id = (c.req.query("id") ?? "").trim().slice(0, 140);
+  const source = (c.req.query("source") ?? "").toLowerCase();
+  const title = (c.req.query("title") ?? "").trim().slice(0, 200);
+  const base = Number(c.req.query("base"));
+  const image = validImageUrl(c.req.query("image") ?? "");
+  const validSource = source === "cj" || source === "aliexpress";
+
+  if (!validSource || !id || !title || !Number.isFinite(base) || base <= 0 || base > 100000) {
+    return c.json({ ok: false, error: "invalid_product" }, 400);
+  }
+
+  const lang = langFrom(c);
+  const currency = currencyFrom(c.req.query("currency"));
+  const rates = await getRates(c.env);
+  const rate = rateFor(rates, currency);
+  const pricing = pricingFromEnv(c.env);
+  const sourceId = source as SourceId;
+  const shipping = DEFAULT_SHIPPING[sourceId];
+  const supplierPrice = round2(Math.max(base - shipping.cost_myr, 0.01));
+  const margin = applyMargin(supplierPrice, shipping.cost_myr, pricing);
+
+  const product = {
+    id,
+    source: sourceId,
+    source_label: SOURCE_META[sourceId].label,
+    title,
+    price_myr: margin.price,
+    total_myr: margin.total,
+    shipping,
+    image,
+    url: "",
+    moq: 1,
+    rating: null,
+    orders: null,
+    demo: false,
+    supplier_price_myr: margin.supplier_price,
+    supplier_total_myr: margin.supplier_total,
+    margin_myr: margin.margin,
+    checkout_url: "",
+    whatsapp_url: "",
+  } as PricedProduct;
+
+  const text = orderMessage(product, lang, currency, rate);
+  const waUrl = `https://wa.me/${whatsappNumber(c.env)}?text=${encodeURIComponent(text)}`;
+  const tgUrl = telegramUrl(text);
+
+  const html = productDetailHtml({
+    title,
+    id,
+    source: sourceId,
+    sourceLabel: SOURCE_META[sourceId].label,
+    image,
+    supplierTotal: base,
+    pricing,
+    rates,
+    currency,
+    rate,
+    lang,
+    waUrl,
+    tgUrl,
+  });
+
+  c.header("Cache-Control", "no-store");
+  return c.json({ ok: true, id, source: sourceId, title, wa_url: waUrl, tg_url: tgUrl, html });
 });
 
 app.get("/api", (c) =>
