@@ -64,6 +64,8 @@ export interface Env {
   WHATSAPP_ORDER_NUMBER?: string;
   /** Optional KV namespace for the 12h exchange-rate cache. */
   MYKIRA_KV?: KVNamespace;
+  /** MyKiraShop D1 (products) for the Google Shopping feed. */
+  DB?: D1Database;
   ENVIRONMENT?: string;
 }
 
@@ -5411,6 +5413,105 @@ ${trendingBody(c.env, lang, currency, rate, items, false)}`,
   );
 });
 
+const FEED_BASE = "https://mykirashop.mykira.workers.dev";
+
+interface FeedProduct {
+  id: string;
+  title: string;
+  description: string;
+  image: string;
+  price: number;
+}
+
+function xmlEscape(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+async function loadFeedProducts(env: Env): Promise<FeedProduct[]> {
+  if (!env.DB) return [];
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT id, nama, harga, gambar, penerangan
+         FROM products
+        WHERE aktif = 1
+          AND gambar IS NOT NULL
+          AND TRIM(gambar) <> ''
+        ORDER BY id ASC
+        LIMIT 500`,
+    ).all<Record<string, unknown>>();
+
+    const items: FeedProduct[] = [];
+    for (const row of results ?? []) {
+      const image = validImageUrl(str(row.gambar));
+      const title = str(row.nama);
+      const price = num(row.harga);
+      if (!image || !title || price === null || price <= 0) continue;
+      items.push({
+        id: str(row.id),
+        title,
+        description:
+          str(row.penerangan) ||
+          `${title} — dihantar dari pembekal terpilih MyKiraShop.`,
+        image,
+        price: round2(price),
+      });
+    }
+    return items;
+  } catch {
+    return [];
+  }
+}
+
+function buildGoogleShoppingFeed(items: FeedProduct[]): string {
+  const entries = items
+    .map((item) => {
+      const link = `${FEED_BASE}/product/${encodeURIComponent(item.id)}`;
+      // mykirashop has no /api/image-proxy, so the working proxy lives on this worker.
+      const imageLink = `${SITE_URL}/api/image-proxy?url=${encodeURIComponent(
+        item.image,
+      )}`;
+      return `    <item>
+      <title>${xmlEscape(item.title)}</title>
+      <link>${xmlEscape(link)}</link>
+      <description>${xmlEscape(item.description)}</description>
+      <g:id>${xmlEscape(item.id)}</g:id>
+      <g:title>${xmlEscape(item.title)}</g:title>
+      <g:description>${xmlEscape(item.description)}</g:description>
+      <g:link>${xmlEscape(link)}</g:link>
+      <g:image_link>${xmlEscape(imageLink)}</g:image_link>
+      <g:price>${item.price.toFixed(2)} MYR</g:price>
+      <g:availability>in_stock</g:availability>
+      <g:condition>new</g:condition>
+      <g:brand>MyKiraShop</g:brand>
+    </item>`;
+    })
+    .join("\n");
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:g="http://base.google.com/ns/1.0">
+  <channel>
+    <title>MyKiraShop — Google Shopping Feed</title>
+    <link>${FEED_BASE}/</link>
+    <description>Active MyKiraShop products with MYR landed prices.</description>
+    <language>ms-MY</language>
+${entries}
+  </channel>
+</rss>
+`;
+}
+
+app.get("/api/google-shopping-feed.xml", async (c) => {
+  const items = await loadFeedProducts(c.env);
+  const xml = buildGoogleShoppingFeed(items);
+  c.header("Content-Type", "application/xml; charset=utf-8");
+  c.header("Cache-Control", "max-age=3600");
+  return c.body(xml);
+});
 app.get("/api/image-proxy", async (c) => {
   const target = validImageUrl(c.req.query("url") ?? "");
   if (!target) return c.redirect("/placeholder.svg", 302);

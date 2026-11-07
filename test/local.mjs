@@ -839,5 +839,47 @@ console.log("27) image proxy");
   }
 }
 
+console.log("28) Google Shopping feed");
+{
+  const empty = await req("/api/google-shopping-feed.xml");
+  const emptyBody = await empty.text();
+  check("feed 200", empty.status === 200, empty.status);
+  check("feed content type", (empty.headers.get("content-type") ?? "").includes("application/xml"));
+  check("feed cache", (empty.headers.get("cache-control") ?? "").includes("max-age=3600"));
+  check("feed namespace", emptyBody.includes('xmlns:g="http://base.google.com/ns/1.0"'));
+  check("feed channel", emptyBody.includes("<channel>") && emptyBody.includes("</rss>"));
+
+  const fakeDb = {
+    prepare: () => ({
+      all: async () => ({
+        results: [
+          {
+            id: 7,
+            nama: "Test Product & Co",
+            harga: 19.9,
+            gambar: "https://oss-cf.cjdropshipping.com/product/x.jpg",
+            penerangan: "Demo <b>desc</b>",
+          },
+          { id: 8, nama: "No Image", harga: 5, gambar: "", penerangan: "" },
+        ],
+      }),
+    }),
+  };
+  const res = await app.fetch(
+    new Request("http://localhost/api/google-shopping-feed.xml"),
+    { ...env, DB: fakeDb },
+  );
+  const xml = await res.text();
+  check("feed item id", xml.includes("<g:id>7</g:id>"));
+  check("feed escaped title", xml.includes("Test Product &amp; Co"));
+  check("feed link", xml.includes("https://mykirashop.mykira.workers.dev/product/7"));
+  check("feed image link", xml.includes("/api/image-proxy?url="));
+  check("feed price", xml.includes("<g:price>19.90 MYR</g:price>"));
+  check("feed availability", xml.includes("<g:availability>in_stock</g:availability>"));
+  check("feed condition", xml.includes("<g:condition>new</g:condition>"));
+  check("feed brand", xml.includes("<g:brand>MyKiraShop</g:brand>"));
+  check("invalid image row skipped", !xml.includes("No Image"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

@@ -11,6 +11,12 @@ enabled = true
 binding = "MYKIRASHOP"
 service = "mykirashop"
 
+# MyKiraShop products D1 — source for /api/google-shopping-feed.xml
+[[d1_databases]]
+binding = "DB"
+database_name = "mykirashop-db"
+database_id = "57586de1-73ed-4d1e-911b-143eb6667772"
+
 [vars]
 GEMINI_MODEL = "gemini-flash-lite-latest"
 ALIEXPRESS_BASE_URL = "https://api-sg.aliexpress.com/sync"

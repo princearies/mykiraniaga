@@ -145,6 +145,30 @@ Footer semua halaman dan `/contact` (4 bahasa) menyenaraikan
   diberi keutamaan dalam ranking chat.
 - Chat memaparkan **maksimum 6** produk (mobil) — `MAX_CHAT_PRODUCTS`.
 
+## Google Shopping feed
+
+`GET /api/google-shopping-feed.xml` — RSS 2.0 (`xmlns:g`) untuk Google Merchant:
+
+- Sumber: D1 **mykirashop-db** (`products`), `aktif = 1`, imej wajib sah.
+- `g:id`, `g:title`, `g:description`, `g:link` → `https://mykirashop.mykira.workers.dev/product/{id}`,
+  `g:image_link` (proxy imej), `g:price` → `xx.xx MYR`, `g:availability in_stock`,
+  `g:condition new`, `g:brand MyKiraShop`.
+- Header: `Content-Type: application/xml; charset=utf-8`, `Cache-Control: max-age=3600`.
+- Hanya imej raster (jpg/png/webp/gif) diterima — Google tidak terima SVG, jadi 16 produk
+  `mykirashop/img/*.svg` ditapis keluar (6 produk CJ lulus).
+
+Binding D1:
+
+```toml
+[[d1_databases]]
+binding = "DB"
+database_name = "mykirashop-db"
+database_id = "57586de1-73ed-4d1e-911b-143eb6667772"
+```
+
+Nota: `mykirashop` belum ada `/api/image-proxy` (404), jadi `g:image_link` menggunakan proxy
+di worker ini (`mykiraniaga.../api/image-proxy`) supaya imej benar-benar boleh dimuat.
+
 ## AI agent discovery + visual rendering
 
 - `GET /api/search` setiap produk ada:
