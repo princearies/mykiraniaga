@@ -3393,6 +3393,7 @@ function layout(opts: {
 <title>${esc(opts.title)}</title>
 <meta name="description" content="${esc(opts.description)}">
 <meta name="robots" content="index,follow">
+<meta name="google-site-verification" content="h5tqSt-9SACiPHhbGn8D7QaMZR4KHhkrgsB2xJWgDwA">
 <style>${CSS}</style>
 </head>
 <body>
