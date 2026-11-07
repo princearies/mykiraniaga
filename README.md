@@ -156,6 +156,14 @@ Footer semua halaman dan `/contact` (4 bahasa) menyenaraikan
 - `GET /.well-known/ai-plugin.json` — manifest plugin (OpenAPI di `/openapi.json`).
 - `GET /openapi.json` — OpenAPI 3.0.3: `/api/search`, `/api/chat`, `/api/product`.
 - `GET /placeholder.svg` — imej fallback SVG (cache 24 jam).
+- `GET /api/image-proxy?url={httpsImage}` — strim imej provider dari origin kita:
+  - hanya URL `https` dari CDN dikenali (SSRF guard),
+  - sniff magic bytes (PNG/JPEG/GIF/WEBP/AVIF) kerana sesetengah CDN pulang
+    `Content-Type: image/jpeg, image/png`,
+  - had 8 MB, timeout 8s, `Access-Control-Allow-Origin: *`, cache 24 jam,
+  - gagal/timeout → `302 /placeholder.svg`.
+- `image_proxy` disertakan pada setiap hasil `/api/search`, dan `markdown_image`/
+  `markdown_card` menggunakan URL proxy ini supaya UI AI tidak kena hotlink block.
 
 ## Multi-bahasa
 

@@ -796,5 +796,48 @@ console.log("26) AI discovery manifests + markdown");
   check("placeholder svg", placeholder.status === 200 && (placeholder.headers.get("content-type") ?? "").includes("image/svg"));
 }
 
+console.log("27) image proxy");
+{
+  const res = await req("/api/search?q=earbuds");
+  const data = await res.json();
+  const p = data.results[0];
+  const withImage = data.results.find((row) => row.image);
+  check(
+    "image_proxy field",
+    withImage
+      ? withImage.image_proxy.includes("/api/image-proxy?url=")
+      : p.image_proxy.endsWith("/placeholder.svg"),
+    p.image_proxy,
+  );
+  check(
+    "markdown uses proxy",
+    p.markdown_image.includes("/api/image-proxy?url=") ||
+      p.markdown_image.includes("/placeholder.svg"),
+    p.markdown_image,
+  );
+
+  const bad = await req("/api/image-proxy?url=" + encodeURIComponent("http://evil.example/a.jpg"), {
+    headers: { Accept: "text/html" },
+  });
+  check("rejects non-https", bad.status === 302 && (bad.headers.get("location") ?? "").includes("/placeholder.svg"), bad.status);
+
+  const weird = await req("/api/image-proxy?url=" + encodeURIComponent("https://example.com/a.jpg"));
+  check("unknown host redirect", weird.status === 302, weird.status);
+
+  const empty = await req("/api/image-proxy");
+  check("missing url redirect", empty.status === 302, empty.status);
+
+  const okUrl = await req("/api/image-proxy?url=" + encodeURIComponent("https://oss-cf.cjdropshipping.com/product/2026/08/13/10/95a688e6-570d-451b-8224-5d3a7a34ccac.jpg"));
+  check(
+    "valid image streams or falls back",
+    okUrl.status === 200 || okUrl.status === 302,
+    okUrl.status,
+  );
+  if (okUrl.status === 200) {
+    check("image content-type", (okUrl.headers.get("content-type") ?? "").startsWith("image/"), okUrl.headers.get("content-type"));
+    check("cors header", okUrl.headers.get("access-control-allow-origin") === "*");
+  }
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

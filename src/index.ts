@@ -897,11 +897,20 @@ function presentProduct(
     ),
     price_display: convertCurrency(product.price_myr, rate),
     total_display: convertCurrency(product.total_myr, rate),
+    image_proxy: product.image
+      ? `${SITE_URL}/api/image-proxy?url=${encodeURIComponent(product.image)}`
+      : PLACEHOLDER_IMAGE,
     markdown_image: `![${escapeMarkdown(product.title)}](${
-      product.image ?? PLACEHOLDER_IMAGE
+      product.image
+        ? `${SITE_URL}/api/image-proxy?url=${encodeURIComponent(product.image)}`
+        : PLACEHOLDER_IMAGE
     })`,
     markdown_card: [
-      `![${escapeMarkdown(product.title)}](${product.image ?? PLACEHOLDER_IMAGE})`,
+      `![${escapeMarkdown(product.title)}](${
+        product.image
+          ? `${SITE_URL}/api/image-proxy?url=${encodeURIComponent(product.image)}`
+          : PLACEHOLDER_IMAGE
+      })`,
       `**${product.title}**`,
       `Total: RM ${product.total_myr.toFixed(2)}`,
       `[WhatsApp](https://wa.me/${whatsappNumber(env)}?text=${encodeURIComponent(
@@ -1436,6 +1445,40 @@ function parseCjPrice(raw: string): number | null {
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif|avif)(\?|#|$)/i;
 const IMAGE_HOSTS =
   /(^|\.)(cjdropshipping\.com|aliexpress-media\.com|alicdn\.com|aliexpress\.com)$/i;
+
+/** Detect the real image type from magic bytes (CDNs sometimes send bad headers). */
+function sniffImageType(bytes: Uint8Array): string | null {
+  const b = bytes;
+  if (b.length < 12) return null;
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) {
+    return "image/png";
+  }
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (
+    b[0] === 0x47 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x38
+  ) {
+    return "image/gif";
+  }
+  if (
+    b[0] === 0x52 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x46 &&
+    b[8] === 0x57 &&
+    b[9] === 0x45 &&
+    b[10] === 0x42 &&
+    b[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  if (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+    return "image/avif";
+  }
+  return null;
+}
 
 /** Strict visual guardrail: only absolute https image URLs from known CDNs. */
 function validImageUrl(raw: string): string | null {
@@ -5368,6 +5411,44 @@ ${trendingBody(c.env, lang, currency, rate, items, false)}`,
   );
 });
 
+app.get("/api/image-proxy", async (c) => {
+  const target = validImageUrl(c.req.query("url") ?? "");
+  if (!target) return c.redirect("/placeholder.svg", 302);
+
+  try {
+    const upstream = await fetch(target, {
+      headers: { Accept: "image/*", "User-Agent": "MyKiraNiaga/1.0 image-proxy" },
+      redirect: "follow",
+      signal: timeoutSignal(8000),
+    });
+
+    if (!upstream.ok) return c.redirect("/placeholder.svg", 302);
+
+    const bytes = new Uint8Array(await upstream.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > 8 * 1024 * 1024) {
+      return c.redirect("/placeholder.svg", 302);
+    }
+
+    // Some CDNs send multi-value types like "image/jpeg, image/png" — sniff the bytes.
+    const sniffed = sniffImageType(bytes);
+    const headerType = (upstream.headers.get("content-type") ?? "")
+      .toLowerCase()
+      .split(",")
+      .map((part) => part.split(";")[0].trim())
+      .find((part) => /^image\/(jpeg|jpg|png|webp|gif|avif)$/.test(part));
+    const type = sniffed ?? headerType;
+
+    if (!type) return c.redirect("/placeholder.svg", 302);
+
+    c.header("Content-Type", type);
+    c.header("Cache-Control", "public, max-age=86400");
+    c.header("Access-Control-Allow-Origin", "*");
+    c.header("X-Content-Type-Options", "nosniff");
+    return c.body(bytes);
+  } catch {
+    return c.redirect("/placeholder.svg", 302);
+  }
+});
 app.get("/api/product", async (c) => {
   const id = (c.req.query("id") ?? "").trim().slice(0, 140);
   const source = (c.req.query("source") ?? "").toLowerCase();
@@ -5525,6 +5606,8 @@ app.get("/llms.txt", (c) => {
    validated (\`https\` only) and fall back to \`${PLACEHOLDER_IMAGE}\` when the supplier
    provides no usable image.
 3. Do not hotlink bare \`image\` values without checking they start with \`https://\`.
+   The response also provides \`image_proxy\` (/api/image-proxy?url=) which streams the
+   image from our origin with CORS enabled — prefer it inside AI UI clients.
 4. When replying in a chat canvas, paste \`markdown_card\` verbatim so the user sees the
    image, title, MYR landed cost and the WhatsApp/Telegram checkout links.
 
