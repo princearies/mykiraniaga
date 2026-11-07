@@ -758,5 +758,43 @@ console.log("25) tab bar + trending page");
   check("trending json", json.ok === true && json.count > 0, JSON.stringify(json).slice(0, 60));
 }
 
+console.log("26) AI discovery manifests + markdown");
+{
+  const res = await req("/api/search?q=earbuds&currency=USD");
+  const data = await res.json();
+  const p = data.results[0];
+  check("markdown_image field", typeof p.markdown_image === "string" && p.markdown_image.startsWith("!["), p.markdown_image);
+  check("markdown_image https", /\]\(https:\/\//.test(p.markdown_image), p.markdown_image);
+  check("markdown_card field", typeof p.markdown_card === "string");
+  check("card has total MYR", p.markdown_card.includes("Total: RM "), p.markdown_card.slice(0, 80));
+  check("card has whatsapp", p.markdown_card.includes("wa.me/"));
+  check("card has telegram", p.markdown_card.includes("t.me/Mykirashopbot"));
+  check(
+    "all markdown images valid",
+    data.results.every((row) => /\]\(https:\/\/[^\s)]+\)/.test(row.markdown_image)),
+  );
+
+  const llms = await req("/llms.txt");
+  const llmsBody = await llms.text();
+  check("llms status", llms.status === 200);
+  check("llms content type", (llms.headers.get("content-type") ?? "").includes("text/plain"));
+  check("llms instructions", llmsBody.includes("markdown_image") && llmsBody.includes("![title](url)"));
+
+  const plugin = await req("/.well-known/ai-plugin.json");
+  const pluginData = await plugin.json();
+  check("plugin schema", pluginData.schema_version === "v1");
+  check("plugin name", pluginData.name_for_model === "mykiraniaga");
+  check("plugin api url", pluginData.api?.url.endsWith("/openapi.json"));
+
+  const openapi = await req("/openapi.json");
+  const spec = await openapi.json();
+  check("openapi version", spec.openapi === "3.0.3");
+  check("openapi search path", Boolean(spec.paths?.["/api/search"]?.get));
+  check("openapi chat path", Boolean(spec.paths?.["/api/chat"]?.post));
+
+  const placeholder = await req("/placeholder.svg");
+  check("placeholder svg", placeholder.status === 200 && (placeholder.headers.get("content-type") ?? "").includes("image/svg"));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

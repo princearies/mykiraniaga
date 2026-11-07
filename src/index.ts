@@ -69,6 +69,11 @@ export interface Env {
 
 const SERVICE = "mykiraniaga";
 const SITE_URL = "https://mykiraniaga.mykira.workers.dev";
+const PLACEHOLDER_IMAGE = `${SITE_URL}/placeholder.svg`;
+
+function escapeMarkdown(value: string): string {
+  return value.replace(/([\[\]()\\])/g, "\\$1");
+}
 const VERSION = "1.0.0";
 const DEFAULT_GEMINI_MODEL = "gemini-flash-lite-latest";
 // Note: gemini-2.5-flash-lite / gemini-2.0-flash-lite now return 404 for new
@@ -892,6 +897,19 @@ function presentProduct(
     ),
     price_display: convertCurrency(product.price_myr, rate),
     total_display: convertCurrency(product.total_myr, rate),
+    markdown_image: `![${escapeMarkdown(product.title)}](${
+      product.image ?? PLACEHOLDER_IMAGE
+    })`,
+    markdown_card: [
+      `![${escapeMarkdown(product.title)}](${product.image ?? PLACEHOLDER_IMAGE})`,
+      `**${product.title}**`,
+      `Total: RM ${product.total_myr.toFixed(2)}`,
+      `[WhatsApp](https://wa.me/${whatsappNumber(env)}?text=${encodeURIComponent(
+        orderMessage(product, lang, "MYR", 1),
+      )}) · [Telegram](${telegramUrl(
+        orderMessage(product, lang, "MYR", 1),
+      )})`,
+    ].join("\n"),
     ...(currency === "MYR"
       ? {}
       : { whatsapp_url: whatsappUrlFor(env, product, currency, rate, lang) }),
@@ -915,7 +933,9 @@ function formatMoney(
       currency,
       maximumFractionDigits: currency === "IDR" ? 0 : 2,
       minimumFractionDigits: currency === "IDR" ? 0 : 2,
-    }).format(amount);
+    })
+      .format(amount)
+      .replace(/\u00a0/g, " ");
   } catch {
     return `${currency} ${amount.toFixed(2)}`;
   }
@@ -5473,6 +5493,175 @@ app.get("/health", (c) =>
 );
 
 app.get("/robots.txt", (c) => c.text("User-agent: *\nAllow: /\n"));
+
+app.get("/placeholder.svg", (c) => {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="450" viewBox="0 0 600 450"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#123049"/><stop offset="1" stop-color="#2a1c46"/></linearGradient></defs><rect width="600" height="450" fill="url(#g)"/><text x="300" y="215" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700" fill="#7dd3fc">MyKiraNiaga</text><text x="300" y="255" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="16" fill="#8fa3c4">product image unavailable</text></svg>`;
+  c.header("Content-Type", "image/svg+xml; charset=utf-8");
+  c.header("Cache-Control", "public, max-age=86400");
+  return c.body(svg);
+});
+
+app.get("/llms.txt", (c) => {
+  const body = `# MyKiraNiaga
+
+> Dropshipping product search for Malaysia. Every result is normalised to MYR and
+> carries the landed cost (item + shipping + 20% margin) plus checkout links.
+
+## API
+
+- \`GET /api/search?q={query}&currency=MYR|USD|SGD|IDR|CNY&lang=ms|en|id|zh&limit=1..40\`
+  Returns \`results[]\` where each item has:
+  - \`markdown_image\`: ready-to-render Markdown image \`![title](https://...)\`
+  - \`markdown_card\`: image + title + \`Total: RM x.xx\` + WhatsApp/Telegram links
+  - \`display_price\`, \`display_total\`, \`display_margin\` in the requested currency
+- \`GET /api/product?id={id}&source=cj|aliexpress&title=&base=\` — detail HTML (specs, reviews)
+- \`POST /api/chat\` with \`{ messages: [{ role, content }], lang, currency }\`
+- \`GET /api\` — endpoint index · \`GET /openapi.json\` — OpenAPI 3.0 spec
+
+## Rendering rules for AI agents
+
+1. Always render product images with standard Markdown: \`![title](url)\`.
+2. Prefer \`markdown_image\` / \`markdown_card\` from the response — they are already
+   validated (\`https\` only) and fall back to \`${PLACEHOLDER_IMAGE}\` when the supplier
+   provides no usable image.
+3. Do not hotlink bare \`image\` values without checking they start with \`https://\`.
+4. When replying in a chat canvas, paste \`markdown_card\` verbatim so the user sees the
+   image, title, MYR landed cost and the WhatsApp/Telegram checkout links.
+
+## Example
+
+\`\`\`bash
+curl "https://mykiraniaga.mykira.workers.dev/api/search?q=chainsaw&currency=MYR"
+\`\`\`
+
+\`\`\`json
+{
+  "results": [
+    {
+      "title": "Cordless Chainsaw 12\\"",
+      "markdown_image": "![Cordless Chainsaw 12\\"](https://cf.cjdropshipping.com/...)",
+      "markdown_card": "![Cordless Chainsaw 12\\"](https://cf.cjdropshipping.com/...)\\n**Cordless Chainsaw 12\\"**\\nTotal: RM 185.82\\n[WhatsApp](https://wa.me/...) · [Telegram](https://t.me/Mykirashopbot?text=...)"
+    }
+  ]
+}
+\`\`\`
+
+## Policies
+
+- Privacy: ${SITE_URL}/privacy
+- Terms: ${SITE_URL}/terms
+- Shipping: ${SITE_URL}/shipping
+- Returns: ${SITE_URL}/refunds
+- Contact: ${SITE_URL}/contact
+`;
+  c.header("Content-Type", "text/plain; charset=utf-8");
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.body(body);
+});
+
+app.get("/.well-known/ai-plugin.json", (c) => {
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.json({
+    schema_version: "v1",
+    name_for_human: "MyKiraNiaga",
+    name_for_model: "mykiraniaga",
+    description_for_human:
+      "Dropshipping product search for Malaysia with landed cost in MYR and WhatsApp/Telegram checkout.",
+    description_for_model:
+      "Search dropshipping products across CJ Dropshipping and AliExpress. Results are normalised to MYR with a 20% margin and include markdown_image and markdown_card fields for rendering. Use GET /api/search?q= and render markdown_image with ![title](url).",
+    auth: { type: "none" },
+    api: {
+      type: "openapi",
+      url: `${SITE_URL}/openapi.json`,
+      is_user_authenticated: false,
+    },
+    logo_url: `${SITE_URL}/placeholder.svg`,
+    contact_email: "support@mykiraniaga.example",
+    legal_info_url: `${SITE_URL}/terms`,
+  });
+});
+
+app.get("/openapi.json", (c) => {
+  c.header("Cache-Control", "public, max-age=3600");
+  return c.json({
+    openapi: "3.0.3",
+    info: {
+      title: "MyKiraNiaga API",
+      version: VERSION,
+      description:
+        "Dropshipping search + chat. Product results include markdown_image and markdown_card for AI rendering.",
+    },
+    servers: [{ url: SITE_URL }],
+    paths: {
+      "/api/search": {
+        get: {
+          operationId: "searchProducts",
+          summary: "Search CJ Dropshipping + AliExpress",
+          parameters: [
+            { name: "q", in: "query", required: true, schema: { type: "string", minLength: 2, maxLength: 200 } },
+            { name: "currency", in: "query", schema: { type: "string", enum: CURRENCIES } },
+            { name: "lang", in: "query", schema: { type: "string", enum: ["ms", "en", "id", "zh"] } },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 40, default: 24 } },
+          ],
+          responses: {
+            "200": {
+              description: "Search results with markdown fields",
+              content: { "application/json": { schema: { type: "object" } } },
+            },
+          },
+        },
+      },
+      "/api/chat": {
+        post: {
+          operationId: "chat",
+          summary: "Multi-turn shopping assistant",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    messages: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          role: { type: "string", enum: ["user", "assistant"] },
+                          content: { type: "string" },
+                        },
+                        required: ["role", "content"],
+                      },
+                    },
+                    lang: { type: "string", enum: ["ms", "en", "id", "zh"] },
+                    currency: { type: "string", enum: CURRENCIES },
+                  },
+                  required: ["messages"],
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "reply, intent, products and metrics" },
+          },
+        },
+      },
+      "/api/product": {
+        get: {
+          operationId: "productDetail",
+          summary: "Product detail HTML (specs, reviews, checkout links)",
+          parameters: [
+            { name: "id", in: "query", required: true, schema: { type: "string" } },
+            { name: "source", in: "query", required: true, schema: { type: "string", enum: ["cj", "aliexpress"] } },
+            { name: "title", in: "query", required: true, schema: { type: "string" } },
+            { name: "base", in: "query", required: true, schema: { type: "number" } },
+          ],
+          responses: { "200": { description: "Product detail payload" } },
+        },
+      },
+    },
+  });
+});
 
 for (const slug of POLICY_SLUGS) {
   app.get(`/${slug}`, (c) => {

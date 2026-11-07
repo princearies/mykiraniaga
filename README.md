@@ -145,6 +145,18 @@ Footer semua halaman dan `/contact` (4 bahasa) menyenaraikan
   diberi keutamaan dalam ranking chat.
 - Chat memaparkan **maksimum 6** produk (mobil) — `MAX_CHAT_PRODUCTS`.
 
+## AI agent discovery + visual rendering
+
+- `GET /api/search` setiap produk ada:
+  - `markdown_image`: `![title](https://…)` — hanya URL https yang divalidasi, fallback ke
+    `${SITE_URL}/placeholder.svg` jika tiada imej sah.
+  - `markdown_card`: imej + tajuk + `Total: RM x.xx` + pautan WhatsApp/Telegram.
+- `GET /llms.txt` — arahan untuk LLM/agen: render `![title](url)`, guna `markdown_card`
+  verbatim, jangan hotlink URL bukan https.
+- `GET /.well-known/ai-plugin.json` — manifest plugin (OpenAPI di `/openapi.json`).
+- `GET /openapi.json` — OpenAPI 3.0.3: `/api/search`, `/api/chat`, `/api/product`.
+- `GET /placeholder.svg` — imej fallback SVG (cache 24 jam).
+
 ## Multi-bahasa
 
 Bahasa: **ms · en · id · zh** (`?lang=`, cookie `mkn_lang` 30 hari, dropdown header).
