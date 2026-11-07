@@ -736,5 +736,27 @@ console.log("24) product detail modal");
   check("invalid detail 400", bad.status === 400, bad.status);
 }
 
+console.log("25) tab bar + trending page");
+{
+  const home = await (await req("/")).text();
+  check("tab bar", home.includes('class="tabbar"'));
+  check("mygate tab", home.includes("https://mygate.mykira.workers.dev/"));
+  check("shop tab", home.includes("https://mykirashop.mykira.workers.dev/"));
+  check("chat tab active", home.includes('class="tab active" href="/"'));
+  check("trending tab", home.includes('href="/trending"'));
+
+  const search = await (await req("/search")).text();
+  check("search tab active", search.includes('class="tab active" href="/search"'));
+
+  const trending = await req("/trending");
+  const body = await trending.text();
+  check("trending page 200", trending.status === 200, trending.status);
+  check("trending page cards", (body.match(/class="card"/g) ?? []).length >= 4);
+  check("trending page title", body.includes("Pilihan Hangat"));
+
+  const json = await (await req("/trending?format=json")).json();
+  check("trending json", json.ok === true && json.count > 0, JSON.stringify(json).slice(0, 60));
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

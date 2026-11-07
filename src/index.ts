@@ -844,6 +844,7 @@ function trendingBody(
   currency: CurrencyCode,
   rate: number,
   items: PricedProduct[],
+  withHeading = true,
 ): string {
   if (items.length === 0) return "";
   const cards = items
@@ -851,8 +852,13 @@ function trendingBody(
     .join("\n");
 
   return `<section class="trending" aria-labelledby="trending-title">
-  <h2 id="trending-title">${esc(t(lang, "trending_title"))}</h2>
-  <p class="tlede">${esc(t(lang, "trending_lede"))}</p>
+  ${
+    withHeading
+      ? `<h2 id="trending-title">${esc(
+          t(lang, "trending_title"),
+        )}</h2><p class="tlede">${esc(t(lang, "trending_lede"))}</p>`
+      : ""
+  }
   <div class="grid">${cards}</div>
   ${trendingJsonLd(items, currency, rate, lang)}
 </section>`;
@@ -2777,6 +2783,11 @@ body.pmlock{overflow:hidden}
 .langlist a.active{color:#22d3ee;font-weight:700}
 .top nav{align-items:center}
 .top nav a{white-space:nowrap}
+.tabbar{display:flex;gap:8px;overflow-x:auto;padding:2px 0 14px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+.tabbar::-webkit-scrollbar{display:none}
+.tab{flex:0 0 auto;display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:999px;background:#0f1b2e;border:1px solid #1e2f4a;color:#b9cbe6;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap}
+.tab:hover{border-color:#2c6d8a;color:#e6eefc;text-decoration:none}
+.tab.active{background:#123049;border-color:#2c6d8a;color:#22d3ee}
 .searchhome{max-width:660px;margin:7vh auto 0;text-align:center}
 .searchlogo{font-size:clamp(30px,5vw,44px);font-weight:800;letter-spacing:-1.2px;background:linear-gradient(100deg,#22d3ee,#a78bfa 75%);-webkit-background-clip:text;background-clip:text;color:transparent}
 .searchtag{color:#9db2d3;font-size:14.5px;margin:10px auto 22px;max-width:520px}
@@ -2833,6 +2844,7 @@ body.pmlock{overflow:hidden}
 [hidden]{display:none!important}
 @media (max-width:768px){
   .split{grid-template-columns:1fr;gap:12px}
+  .tab{padding:11px 14px;font-size:13.5px}
   .mobiletabs{display:flex;position:sticky;top:0;z-index:15;background:#070d18;padding:6px 0;margin:10px 0 0}
   .mobiletabs button{min-height:44px;font-size:14px;display:flex;align-items:center;justify-content:center;gap:6px}
   .pane{display:none}
@@ -3252,6 +3264,54 @@ function currencyFromUrl(fullUrl: string): CurrencyCode {
   return currencyFrom(url.searchParams.get("currency") ?? undefined);
 }
 
+/** MyGate-style tab bar (horizontally scrollable on mobile). */
+function tabsNav(lang: Lang, currentUrl: string): string {
+  const path = new URL(currentUrl, "https://mykiraniaga.local").pathname;
+  const tabs: Array<{ href: string; label: string; active: boolean; external?: boolean }> = [
+    {
+      href: "/",
+      label: `💬 ${t(lang, "nav_chat")}`,
+      active: path === "/" || path === "/chat",
+    },
+    {
+      href: "/search",
+      label: `🔎 ${t(lang, "nav_search")}`,
+      active: path.startsWith("/search"),
+    },
+    {
+      href: "/trending",
+      label: `🔥 ${L(lang, "Trending", "Trending", "Trending", "热门")}`,
+      active: path === "/trending",
+    },
+    {
+      href: "https://mykirashop.mykira.workers.dev/",
+      label: `🛍️ ${L(lang, "Kedai", "Shop", "Toko", "商店")}`,
+      active: false,
+      external: true,
+    },
+    {
+      href: "https://mygate.mykira.workers.dev/",
+      label: "🌐 MyGate",
+      active: false,
+      external: true,
+    },
+    {
+      href: "/status",
+      label: `ℹ️ ${t(lang, "nav_status")}`,
+      active: path === "/status",
+    },
+  ];
+
+  return `<nav class="tabbar" aria-label="Sections">${tabs
+    .map(
+      (tab) =>
+        `<a class="tab${tab.active ? " active" : ""}" href="${tab.href}"${
+          tab.external ? ' target="_blank" rel="noopener"' : ""
+        }>${esc(tab.label)}</a>`,
+    )
+    .join("")}</nav>`;
+}
+
 function layout(opts: {
   title: string;
   description: string;
@@ -3309,6 +3369,7 @@ function layout(opts: {
       </select>
     </nav>
   </header>
+  ${tabsNav(lang, opts.currentUrl)}
   ${opts.body}
   <footer>
     <nav class="footerlinks">
@@ -5256,6 +5317,35 @@ app.get("/api/search", async (c) => {
     rate,
     results,
   });
+});
+
+app.get("/trending", async (c) => {
+  const lang = langFrom(c);
+  const currency = currencyFrom(c.req.query("currency"));
+  const rate = rateFor(await getRates(c.env), currency);
+  const items = await getTrending(c.env);
+
+  if (wantsJson(c)) {
+    return c.json({
+      ok: true,
+      count: items.length,
+      currency,
+      rate,
+      items: items.map((item) => presentProduct(item, c.env, currency, rate, lang)),
+    });
+  }
+
+  return c.html(
+    layout({
+      title: `${t(lang, "trending_title")} — MyKiraNiaga`,
+      description: t(lang, "trending_lede"),
+      body: `<h1>${esc(t(lang, "trending_title"))}</h1>
+<p class="lede">${esc(t(lang, "trending_lede"))}</p>
+${trendingBody(c.env, lang, currency, rate, items, false)}`,
+      lang,
+      currentUrl: c.req.url,
+    }),
+  );
 });
 
 app.get("/api/product", async (c) => {
